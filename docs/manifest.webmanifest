@@ -1,0 +1,9 @@
+{
+  "name": "인계보드",
+  "short_name": "인계보드",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#E8EDEB",
+  "theme_color": "#E8EDEB",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
