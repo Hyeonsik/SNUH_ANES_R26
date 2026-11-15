@@ -1,3 +1,4 @@
+/** @OnlyCurrentDoc */
 /**
  * 인계보드 백엔드 (Google Apps Script)
  *
