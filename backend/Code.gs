@@ -4,6 +4,8 @@
  *
  * 처음 한 번만:
  *   1) 아래 INITIAL_PASSWORDS 세 개를 원하는 비밀번호로 바꾸고, INITIAL_MEMBERS 에 동기 이름을 적는다.
+ *      (이 코드는 반드시 구글 시트 안에서 확장 프로그램 → Apps Script 로 연 프로젝트에 붙여넣는다.
+ *       script.google.com 에서 새로 만든 독립 프로젝트에서는 동작하지 않는다.)
  *   2) 상단 함수 선택에서 setup 을 고르고 ▶ 실행 (권한 승인).
  *   3) 배포 → 새 배포 → 웹 앱 / 실행: 나 / 액세스: 모든 사용자 → URL 복사.
  *   4) 실행이 끝나면 INITIAL_PASSWORDS 는 지워도 된다(비밀번호는 해시로만 저장됨).
@@ -347,6 +349,7 @@ function log_(entryId, action, by, before, after) {
 
 function sheet_(name, cols) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) throw new Error('이 스크립트가 스프레드시트에 연결되어 있지 않습니다. 구글 시트에서 확장 프로그램 → Apps Script 로 만든 프로젝트에 붙여넣어야 합니다.');
   var sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
