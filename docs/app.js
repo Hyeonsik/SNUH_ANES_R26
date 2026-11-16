@@ -353,6 +353,7 @@
     var stale = isStale(e);
     var edited = e.updatedAt && e.updatedAt !== e.createdAt;
     var crumb = opts.crumb ? '<a class="msg-crumb" href="' + crumbHref(e) + '">' + esc(crumbText(e)) + '</a>' : '';
+    if (opts.prof && S.idx.profs[e.target]) crumb = '<a class="prof-label" href="#/p/' + esc(e.target) + '">' + esc(S.idx.profs[e.target].name) + ' 교수님</a>';
     return '<div class="msg' + (stale ? ' stale' : '') + '">' +
       '<span class="avatar" style="background:' + c + '" aria-hidden="true">' + esc(initialOf(e.authorId)) + '</span>' +
       '<div><div class="msg-meta">' +
@@ -521,17 +522,15 @@
 
   // 교수님 인계를 섹션 기준으로 합쳐서 보여준다. 섹션 안에서는 교수님별로 묶는다.
   function mergedProfView(boardId, profs) {
-    var out = '<div class="block-head" style="margin-top:22px"><h2>섹션별로 모아보기</h2></div>';
+    var out = '<div class="block-head" style="margin-top:22px"><h2>교수님 인계 전체</h2><span class="sub">섹션별 · 이름을 누르면 교수님 페이지</span></div>';
     out += S.data.config.profSections.map(function (sec) {
       var key = 'merge|' + boardId + '|' + sec.id;
       var isCol = !!collapsed[key];
       var total = 0;
       var body = profs.map(function (p) {
         var items = (S.idx.byTarget['prof|' + p.id] || []).filter(function (e) { return e.section === sec.id; }).sort(byCreated);
-        if (!items.length) return '';
         total += items.length;
-        return '<div class="tag-group"><a class="tag-title prof-tag" href="#/p/' + esc(p.id) + '">' + esc(p.name) + ' 교수님</a>' +
-          items.map(function (e) { return msg(e); }).join('') + '</div>';
+        return items.map(function (e) { return msg(e, { prof: true }); }).join('');
       }).join('');
       if (!total) return '';
       return '<section class="section' + (isCol ? ' collapsed' : '') + '"><div class="section-head">' +
@@ -1069,7 +1068,15 @@
     else if (t.tagName === 'SELECT') { setDraft(t.getAttribute('data-bind'), t.value); if (t.getAttribute('data-rerender')) rerenderAdmin(); }
   });
   // 드래그 앤 드롭: 업로드 창의 상자, 또는 보드의 "인계장 파일" 영역에 놓으면 업로드 창이 열린다.
-  function dropTarget(ev) { return ev.target.closest && (ev.target.closest('[data-drop]') || ev.target.closest('.docs-block[data-board]')); }
+  function dropTarget(ev) {
+    var el = ev.target && ev.target.nodeType === 1 ? ev.target : ev.target && ev.target.parentElement;
+    if (!el) return null;
+    var t = el.closest('[data-drop]') || el.closest('.docs-block[data-board]');
+    if (t) return t;
+    // 보드 화면이면 어디에 놓아도 그 보드의 인계장으로 올린다.
+    if (sheet.hidden) { var r = parseRoute(); if (r.name === 'b' && r.sub !== 'prof') return document.querySelector('.docs-block[data-board]'); }
+    return null;
+  }
   function hasFiles(ev) { return ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], 'Files') >= 0; }
   ['dragenter', 'dragover'].forEach(function (type) {
     document.addEventListener(type, function (ev) {
