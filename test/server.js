@@ -75,6 +75,17 @@ const ctx = {
       getFileById: id => { if (!files[id]) throw new Error('no file'); return files[id]; }
     };
   })(),
+  Drive: (() => {
+    const store = {};
+    return {
+      Files: {
+        create: (meta, blob) => { const id = 'g' + crypto.randomUUID().slice(0, 8); store[id] = { meta, blob, trashed: false }; return { id }; },
+        get: (id, opt) => { if (!store[id]) throw new Error('404'); return opt && opt.alt === 'media' ? store[id].blob.getBytes() : { id, trashed: store[id].trashed }; },
+        update: (meta, id) => { if (!store[id]) throw new Error('404'); Object.assign(store[id], meta); return { id }; }
+      },
+      Permissions: { create: () => ({}) }
+    };
+  })(),
   ContentService: { MimeType: { JSON: 'json' }, createTextOutput: s => ({ s, setMimeType() { return this; } }) },
   console, Logger: { log: m => console.log("[Logger]", m) }
 };

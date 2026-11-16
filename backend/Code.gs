@@ -175,14 +175,15 @@ function uploadDoc_(req) {
   if (bytes.length > MAX_FILE) throw new Error('파일은 25MB 이하만 올릴 수 있습니다.');
   var name = String(d.name || 'file').slice(0, 200);
   var blob = Utilities.newBlob(bytes, String(d.mime || 'application/octet-stream'), name);
-  var file = folder_().createFile(blob);
+  // 고급 서비스 Drive(v3)를 쓴다. drive.file 권한으로 이 앱이 만든 파일만 다룰 수 있다.
+  var file = Drive.Files.create({ name: name, parents: [folder_()], mimeType: blob.getContentType() }, blob, { fields: 'id' });
   var url = '';
   try {
-    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    url = 'https://drive.google.com/file/d/' + file.getId() + '/view';
+    Drive.Permissions.create({ type: 'anyone', role: 'reader' }, file.id);
+    url = 'https://drive.google.com/file/d/' + file.id + '/view';
   } catch (e) { url = ''; }
   return locked_(function () {
-    var row = docRow_(d, req.by, { kind: 'file', fileId: file.getId(), url: url, name: name, mime: blob.getContentType(), size: String(bytes.length) });
+    var row = docRow_(d, req.by, { kind: 'file', fileId: file.id, url: url, name: name, mime: blob.getContentType(), size: String(bytes.length) });
     appendRow_(sheet_('docs', DOC_COLS), DOC_COLS, row);
     delete row.deleted; delete row.fileId;
     return { doc: row };
@@ -217,7 +218,7 @@ function deleteDoc_(req) {
   found.obj.deleted = 'TRUE';
   writeRow_(sh, DOC_COLS, found.rowIndex, found.obj);
   if (found.obj.fileId) {
-    try { DriveApp.getFileById(found.obj.fileId).setTrashed(true); } catch (e) { /* 이미 없음 */ }
+    try { Drive.Files.update({ trashed: true }, found.obj.fileId); } catch (e) { /* 이미 없음 */ }
   }
   return { id: req.id };
 }
@@ -225,19 +226,23 @@ function deleteDoc_(req) {
 function docData_(req) {
   var found = findRow_(sheet_('docs', DOC_COLS), DOC_COLS, req.id);
   if (!found || truthy_(found.obj.deleted) || !found.obj.fileId) throw new Error('파일을 찾을 수 없습니다.');
-  var blob = DriveApp.getFileById(found.obj.fileId).getBlob();
-  return { name: found.obj.name, mime: found.obj.mime, data: Utilities.base64Encode(blob.getBytes()) };
+  var bytes = Drive.Files.get(found.obj.fileId, { alt: 'media' });
+  if (bytes && bytes.getBytes) bytes = bytes.getBytes();
+  return { name: found.obj.name, mime: found.obj.mime, data: Utilities.base64Encode(bytes) };
 }
 
 function folder_() {
   var props = PropertiesService.getScriptProperties();
   var id = props.getProperty('FOLDER_ID');
   if (id) {
-    try { return DriveApp.getFolderById(id); } catch (e) { /* 폴더가 지워졌으면 새로 만든다 */ }
+    try {
+      var cur = Drive.Files.get(id, { fields: 'id,trashed' });
+      if (!cur.trashed) return id;
+    } catch (e) { /* 폴더가 지워졌으면 새로 만든다 */ }
   }
-  var f = DriveApp.createFolder(FOLDER_NAME);
-  props.setProperty('FOLDER_ID', f.getId());
-  return f;
+  var f = Drive.Files.create({ name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' }, null, { fields: 'id' });
+  props.setProperty('FOLDER_ID', f.id);
+  return f.id;
 }
 
 function checkBoard_(id) {
