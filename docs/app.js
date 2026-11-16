@@ -493,9 +493,9 @@
         '<div class="doc-actions"><button class="btn btn-sm btn-primary" data-act="doc-open" data-id="' + esc(d.id) + '">열기</button>' +
         '<button class="btn btn-sm" data-act="doc-more" data-board="' + esc(boardId) + '" data-slot="' + esc(slot) + '">더보기</button></div></div>';
     }).join('') : '';
-    return '<section class="docs-block"><div class="section-head"><div class="section-toggle"><h2>인계장 파일</h2><span class="count">' + (docs ? docs.order.length : 0) + '</span></div>' +
+    return '<section class="docs-block" data-board="' + esc(boardId) + '"><div class="section-head"><div class="section-toggle"><h2>인계장 파일</h2><span class="count">' + (docs ? docs.order.length : 0) + '</span></div>' +
       (canWrite() ? '<button class="add-link" data-act="doc-upload" data-board="' + esc(boardId) + '">올리기</button>' : '') + '</div>' +
-      (cards || '<div class="empty-line">hwp, pdf, pptx, docx 같은 긴 인계장 파일을 올려두면 여기서 바로 열 수 있어요.</div>') + '</section>';
+      (cards || '<div class="empty-line">hwp, pdf, pptx, docx 같은 긴 인계장 파일을 올려두면 여기서 바로 열 수 있어요.' + (canWrite() ? ' 파일을 이 영역에 끌어다 놓아도 됩니다.' : '') + '</div>') + '</section>';
   }
 
   function profRows(list) {
@@ -511,8 +511,35 @@
     var list = boardProfs(id);
     return '<div class="page-head"><div class="eyebrow">' + esc(b.group || '') + '</div><h1>' + esc(b.name) + '</h1></div>' +
       boardSeg(b, 'prof') +
-      (list.length ? profRows(list) : '<div class="empty-line">이 보드에 연결된 교수님이 없습니다.</div>') +
-      (isAdmin() ? '<p><button class="btn btn-sm" data-act="prof-edit" data-board="' + esc(id) + '">교수님 추가</button></p>' : '');
+      (list.length ? '<div class="prof-chips">' + list.map(function (p) {
+        var n = S.idx.counts['prof|' + p.id] || 0;
+        return '<a class="prof-chip" href="#/p/' + esc(p.id) + '"><b>' + esc(p.name) + '</b><span class="sub">' + n + '</span></a>';
+      }).join('') + '</div>' : '<div class="empty-line">이 보드에 연결된 교수님이 없습니다.</div>') +
+      (isAdmin() ? '<p><button class="btn btn-sm" data-act="prof-edit" data-board="' + esc(id) + '">교수님 추가</button></p>' : '') +
+      (list.length ? mergedProfView(id, list) : '');
+  }
+
+  // 교수님 인계를 섹션 기준으로 합쳐서 보여준다. 섹션 안에서는 교수님별로 묶는다.
+  function mergedProfView(boardId, profs) {
+    var out = '<div class="block-head" style="margin-top:22px"><h2>섹션별로 모아보기</h2></div>';
+    out += S.data.config.profSections.map(function (sec) {
+      var key = 'merge|' + boardId + '|' + sec.id;
+      var isCol = !!collapsed[key];
+      var total = 0;
+      var body = profs.map(function (p) {
+        var items = (S.idx.byTarget['prof|' + p.id] || []).filter(function (e) { return e.section === sec.id; }).sort(byCreated);
+        if (!items.length) return '';
+        total += items.length;
+        return '<div class="tag-group"><a class="tag-title prof-tag" href="#/p/' + esc(p.id) + '">' + esc(p.name) + ' 교수님</a>' +
+          items.map(function (e) { return msg(e); }).join('') + '</div>';
+      }).join('');
+      if (!total) return '';
+      return '<section class="section' + (isCol ? ' collapsed' : '') + '"><div class="section-head">' +
+        '<button class="section-toggle" data-act="toggle" data-key="' + esc(key) + '" aria-expanded="' + !isCol + '">' +
+        '<h2>' + esc(sec.name) + '</h2><span class="count">' + total + '</span><span class="caret">▼</span></button></div>' +
+        '<div class="section-body">' + body + '</div></section>';
+    }).join('');
+    return out;
   }
 
   /* ---------- 화면: 교수님 ---------- */
@@ -667,7 +694,30 @@
   var MAX_UPLOAD = 25 * 1024 * 1024;
   function findDoc(id) { return (S.data.docs || []).filter(function (x) { return x.id === id; })[0]; }
 
-  function openDocUpload(boardId, slot) {
+  function setDropFile(form, file) {
+    var input = form.querySelector('[name=file]');
+    try {
+      var dt = new DataTransfer(); dt.items.add(file); input.files = dt.files;
+    } catch (e) { form._dropped = file; }
+    showPicked(form);
+  }
+  function pickedFile(form) {
+    var input = form.querySelector('[name=file]');
+    return (input.files && input.files[0]) || form._dropped || null;
+  }
+  function showPicked(form) {
+    var f = pickedFile(form), t = form.querySelector('.dz-text');
+    if (!t) return;
+    t.textContent = f ? f.name + ' (' + fmtSize(f.size) + ')' : '파일을 여기로 끌어다 놓거나 눌러서 고르세요';
+    form.querySelector('.dropzone').classList.toggle('has-file', !!f);
+    if (f) {
+      var title = form.querySelector('[name=title]');
+      if (!title.value) title.value = f.name.replace(/\.[^.]+$/, '');
+      form.querySelector('[name=file]').required = false;
+    }
+  }
+
+  function openDocUpload(boardId, slot, droppedFile) {
     var cur = slot && S.idx.docs[boardId] ? S.idx.docs[boardId].slots[slot][0] : null;
     var now = new Date();
     var defNote = now.getFullYear() + '년 ' + (now.getMonth() + 1) + '월 업데이트';
@@ -675,12 +725,14 @@
       '<h2 class="sheet-title">' + (cur ? '새 버전으로 교체' : esc(S.idx.boards[boardId].name) + ' 인계장 올리기') + '</h2>' +
       (cur ? '<p class="muted" style="margin:-8px 0 14px;font-size:14px">지금 버전(' + esc(cur.title) + ', ' + shortDate(cur.at) + ')은 이전 버전으로 남습니다.</p>' : '') +
       '<div class="seg" style="margin:0 0 14px"><a href="javascript:void 0" data-act="doc-mode" data-mode="file" aria-current="page">파일 올리기</a><a href="javascript:void 0" data-act="doc-mode" data-mode="link">링크로 등록</a></div>' +
-      '<label class="field doc-file"><span>파일 (25MB 이하)</span><input class="input" type="file" name="file" required accept=".pdf,.hwp,.hwpx,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.png,.jpg,.jpeg"></label>' +
+      '<label class="field doc-file"><span>파일 (25MB 이하)</span><span class="dropzone" data-drop="1"><input type="file" name="file" required accept=".pdf,.hwp,.hwpx,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.png,.jpg,.jpeg">' +
+      '<span class="dz-text">파일을 여기로 끌어다 놓거나 눌러서 고르세요</span></span></label>' +
       '<label class="field doc-url"><span>주소</span><input class="input" type="url" name="url" placeholder="https://drive.google.com/…"></label>' +
       '<label class="field"><span>제목</span><input class="input" name="title" maxlength="100" value="' + esc(cur ? cur.title : '') + '" placeholder="비우면 파일 이름"></label>' +
       '<label class="field"><span>메모 (선택)</span><input class="input" name="note" maxlength="200" value="' + esc(defNote) + '"></label>' +
       '<div class="upload-status muted" style="font-size:14px;min-height:1em;margin:-4px 0 10px"></div>' +
       '<div class="sheet-actions"><button class="btn" type="button" data-act="close">취소</button><button class="btn btn-primary" type="submit">' + (cur ? '교체' : '올리기') + '</button></div></form>');
+    if (droppedFile) setDropFile(document.getElementById('doc-form'), droppedFile);
   }
 
   function submitDoc(f) {
@@ -698,7 +750,7 @@
       btn.disabled = true;
       return api('addDocLink', { doc: base }).then(done, fail);
     }
-    var file = f.querySelector('[name=file]').files[0];
+    var file = pickedFile(f);
     if (!file) return toast('파일을 고르세요.');
     if (file.size > MAX_UPLOAD) return toast('25MB 이하 파일만 올릴 수 있어요.');
     btn.disabled = true;
@@ -1016,6 +1068,40 @@
     if (t.type === 'checkbox') setDraft(t.getAttribute('data-bind'), t.checked);
     else if (t.tagName === 'SELECT') { setDraft(t.getAttribute('data-bind'), t.value); if (t.getAttribute('data-rerender')) rerenderAdmin(); }
   });
+  // 드래그 앤 드롭: 업로드 창의 상자, 또는 보드의 "인계장 파일" 영역에 놓으면 업로드 창이 열린다.
+  function dropTarget(ev) { return ev.target.closest && (ev.target.closest('[data-drop]') || ev.target.closest('.docs-block[data-board]')); }
+  function hasFiles(ev) { return ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], 'Files') >= 0; }
+  ['dragenter', 'dragover'].forEach(function (type) {
+    document.addEventListener(type, function (ev) {
+      if (!hasFiles(ev)) return;
+      var t = dropTarget(ev);
+      if (!t || !canWrite()) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'copy';
+      t.classList.add('drag-over');
+    });
+  });
+  document.addEventListener('dragleave', function (ev) {
+    var t = dropTarget(ev);
+    if (t && !t.contains(ev.relatedTarget)) t.classList.remove('drag-over');
+  });
+  document.addEventListener('drop', function (ev) {
+    if (!hasFiles(ev)) return;
+    var t = dropTarget(ev);
+    if (!t || !canWrite()) return;
+    ev.preventDefault();
+    t.classList.remove('drag-over');
+    var file = ev.dataTransfer.files[0];
+    if (!file) return;
+    if (t.hasAttribute('data-drop')) setDropFile(t.closest('form'), file);
+    else openDocUpload(t.getAttribute('data-board'), null, file);
+  });
+  window.addEventListener('dragover', function (ev) { if (hasFiles(ev)) ev.preventDefault(); });
+  window.addEventListener('drop', function (ev) { if (hasFiles(ev)) ev.preventDefault(); });
+  document.addEventListener('change', function (ev) {
+    if (ev.target.name === 'file' && ev.target.closest('#doc-form')) showPicked(ev.target.closest('#doc-form'));
+  });
+
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && ev.target.closest('#composer')) {
       ev.preventDefault();
