@@ -1,0 +1,25 @@
+from playwright.sync_api import sync_playwright
+U='http://localhost:8787/'
+errs=[]
+with sync_playwright() as p:
+    b=p.chromium.launch()
+    d=b.new_context(viewport={'width':1280,'height':860}); dp=d.new_page(); dp.on('pageerror', lambda x: errs.append(str(x)))
+    dp.goto(U); dp.fill('#pw','dongi-1234'); dp.click('button[type=submit]'); dp.click('[data-act=pick-me][data-id=m1]'); dp.wait_for_selector('.ov-grid')
+    dp.keyboard.press('Control+k'); dp.wait_for_selector('.palette'); dp.screenshot(path='shots/60-pal-empty.png')
+    dp.keyboard.type('LMA'); dp.wait_for_timeout(150); dp.screenshot(path='shots/61-pal-lma.png')
+    print('LMA items', dp.locator('.pal-item').count())
+    dp.keyboard.press('ArrowDown'); dp.keyboard.press('Enter'); dp.wait_for_timeout(600)
+    print('after enter hash', dp.evaluate('location.hash'), 'flash', dp.locator('.msg.flash').count())
+    dp.screenshot(path='shots/62-pal-jump.png')
+    dp.keyboard.press('/'); dp.wait_for_selector('.palette'); dp.keyboard.type('ㅈㅅㅎ'); dp.wait_for_timeout(150)
+    print('choseong first:', dp.inner_text('.pal-item.sel .pal-title'))
+    dp.keyboard.press('Escape'); print('closed', dp.locator('.palette').count())
+    dp.keyboard.press('Control+k'); dp.keyboard.type('소아 수술'); dp.wait_for_timeout(150)
+    print('소아 수술 first:', dp.inner_text('.pal-item.sel .pal-title'))
+    dp.keyboard.press('Escape'); dp.keyboard.press('Control+k'); dp.wait_for_timeout(100)
+    print('recent:', dp.inner_text('.pal-group >> nth=0'))
+    m=b.new_context(viewport={'width':390,'height':844}, device_scale_factor=2, is_mobile=True); pg=m.new_page()
+    pg.goto(U); pg.fill('#pw','dongi-1234'); pg.click('button[type=submit]'); pg.click('[data-act=pick-me][data-id=m1]'); pg.wait_for_selector('.ov-grid')
+    pg.click('[data-act=palette]'); pg.keyboard.type('dopamine'); pg.wait_for_timeout(150); pg.screenshot(path='shots/63-pal-mobile.png')
+    b.close()
+print('errors', errs)

@@ -184,6 +184,7 @@
     return h;
   }
 
+  var IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   var ICON = {
     search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
@@ -246,6 +247,16 @@
       var el = document.getElementById('sec-' + r.third);
       if (el) { el.classList.remove('collapsed'); setTimeout(function () { el.scrollIntoView({ block: 'start' }); }, 0); }
     }
+    if (S.focusEntry) {
+      var fid = S.focusEntry; S.focusEntry = null;
+      var fe = document.getElementById('e-' + fid);
+      if (fe) {
+        var sec = fe.closest('.section');
+        if (sec) sec.classList.remove('collapsed');
+        setTimeout(function () { fe.scrollIntoView({ block: 'center' }); fe.classList.add('flash'); }, 0);
+        setTimeout(function () { fe.classList.remove('flash'); }, 2200);
+      }
+    }
     if (r.name === 'search') {
       var inp = document.getElementById('q');
       if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
@@ -267,7 +278,7 @@
       stripes(4).map(function (c) { return '<i style="background:' + c + '"></i>'; }).join('') +
       '</span>' + esc(S.data.config.title || '인계보드') + '</a>' +
       '<span class="sync-dot' + (S.busy ? ' busy' : '') + '" title="동기화 상태"></span>' +
-      '<a class="icon-btn" href="#/search" aria-label="검색">' + ICON.search + '</a>' +
+      '<button class="search-pill" data-act="palette" aria-label="전체 검색">' + ICON.search + '<span class="sp-text">검색</span><kbd>' + (IS_MAC ? '⌘' : 'Ctrl') + ' K</kbd></button>' +
       (isAdmin() ? '<a class="icon-btn" href="#/admin" aria-label="관리자 설정">' + ICON.gear + '</a>' : '') +
       me + '</div>' + strip(r) + '</header>';
   }
@@ -356,7 +367,7 @@
     var edited = e.updatedAt && e.updatedAt !== e.createdAt;
     var crumb = opts.crumb ? '<a class="msg-crumb" href="' + crumbHref(e) + '">' + esc(crumbText(e)) + '</a>' : '';
     if (opts.prof && S.idx.profs[e.target]) crumb = '<a class="prof-label" href="#/p/' + esc(e.target) + '">' + esc(S.idx.profs[e.target].name) + ' 교수님</a>';
-    return '<div class="msg' + (stale ? ' stale' : '') + '">' +
+    return '<div class="msg' + (stale ? ' stale' : '') + '" id="e-' + esc(e.id) + '">' +
       '<span class="avatar" style="background:' + c + '" aria-hidden="true">' + esc(initialOf(e.authorId)) + '</span>' +
       '<div><div class="msg-meta">' +
       '<span class="name-label" style="background:' + c + '">' + esc(nameOf(e.authorId)) + '</span>' +
@@ -939,6 +950,7 @@
     var act = el.getAttribute('data-act'), id = el.getAttribute('data-id');
     switch (act) {
       case 'close': closeSheet(); break;
+      case 'palette': openPalette(); break;
       case 'menu': openMenu(); break;
       case 'pick-me':
         S.me = id; ls('me', id); render(); break;
@@ -1213,9 +1225,195 @@
     }).catch(function (e) { btn.disabled = false; toast(e.message); });
   }
 
+  /* ---------- 전체 검색 (Ctrl/⌘+K) ---------- */
+  var PALETTE_UI = { open: false, q: '', sel: 0, items: [], el: null };
+  var CHO = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ';
+  function choseong(str) {
+    var out = '';
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i) - 0xAC00;
+      out += (c >= 0 && c <= 11171) ? CHO[Math.floor(c / 588)] : str[i];
+    }
+    return out;
+  }
+  function isChoQuery(t) { return /^[ㄱ-ㅎ]+$/.test(t); }
+  function matchAll(hay, terms) {
+    var h = hay.toLowerCase(), ch = null;
+    return terms.every(function (t) {
+      if (h.indexOf(t) >= 0) return true;
+      if (isChoQuery(t)) { ch = ch || choseong(h); return ch.indexOf(t) >= 0; }
+      return false;
+    });
+  }
+  function hl(text, terms) {
+    var h = esc(text);
+    terms.filter(function (t) { return !isChoQuery(t); }).forEach(function (t) {
+      var re = new RegExp(esc(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      h = h.replace(re, function (m) { return '\u0001' + m + '\u0002'; });
+    });
+    return h.replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>');
+  }
+  function around(text, terms) {
+    var t = snippet(text), lower = t.toLowerCase(), pos = -1;
+    terms.forEach(function (x) { var i = lower.indexOf(x); if (i >= 0 && (pos < 0 || i < pos)) pos = i; });
+    if (pos > 30) t = '…' + t.slice(pos - 20);
+    return t.slice(0, 140);
+  }
+
+  function paletteItems(q) {
+    var terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+    var groups = [];
+    if (!terms.length) {
+      var rec = [];
+      try { rec = JSON.parse(ls('recentq') || '[]'); } catch (e) { rec = []; }
+      if (rec.length) groups.push({ name: '최근 검색', items: rec.map(function (r) { return { kind: 'recent', icon: '↺', title: r, run: function () { setPaletteQuery(r); } }; }) });
+      groups.push({ name: '바로 가기', items: S.data.config.boards.map(function (b) {
+        return { kind: 'board', icon: '#', title: b.name, sub: b.group, run: function () { location.hash = '#/b/' + b.id; } };
+      }).concat([{ kind: 'page', icon: '◎', title: '교수님 목록', run: function () { location.hash = '#/profs'; } }]) });
+      return groups;
+    }
+    var pages = [];
+    S.data.config.boards.forEach(function (b) {
+      if (matchAll(b.name + ' ' + (b.group || ''), terms)) pages.push({ kind: 'board', icon: '#', title: b.name, sub: (b.group || '') + ' 보드', run: function () { location.hash = '#/b/' + b.id; } });
+      b.sections.forEach(function (sec) {
+        var secTerms = terms.filter(function (t) { return !matchAll(b.name, [t]); });
+        if (secTerms.length && matchAll(b.name + ' ' + sec.name, terms) && matchAll(sec.name, secTerms)) {
+          pages.push({ kind: 'section', icon: '§', title: b.name + ' › ' + sec.name, sub: '섹션', run: function () { location.hash = '#/b/' + b.id + '/s/' + sec.id; } });
+        }
+      });
+    });
+    S.data.profs.forEach(function (p) {
+      if (matchAll(p.name + ' ' + (p.memo || '') + ' 교수님', terms)) pages.push({ kind: 'prof', icon: '◎', title: p.name + ' 교수님', sub: (S.idx.counts['prof|' + p.id] || 0) + '개 · ' + p.boards.map(function (x) { return S.idx.boards[x] ? S.idx.boards[x].name : ''; }).filter(String).join(', '), run: function () { location.hash = '#/p/' + p.id; } });
+    });
+    if (pages.length) groups.push({ name: '페이지', items: pages.slice(0, 8) });
+
+    var entries = S.data.entries.filter(function (e) {
+      return matchAll(e.text + ' ' + (e.tag || '') + ' ' + crumbText(e) + ' ' + nameOf(e.authorId), terms);
+    }).sort(function (a, b) {
+      var ta = a.text.toLowerCase().indexOf(terms[0]) >= 0 ? 0 : 1, tb = b.text.toLowerCase().indexOf(terms[0]) >= 0 ? 0 : 1;
+      return ta - tb || (a.updatedAt < b.updatedAt ? 1 : -1);
+    });
+    if (entries.length) groups.push({ name: '인계 ' + entries.length + '개', items: entries.slice(0, 40).map(function (e) {
+      return { kind: 'entry', icon: '', color: colorOf(e.authorId), title: crumbText(e), html: hl(around(e.text, terms), terms), sub: nameOf(e.authorId) + ' · ' + ago(e.updatedAt),
+        run: function () { S.focusEntry = e.id; var h = crumbHref(e); if (location.hash === h) render(); else location.hash = h; } };
+    }) });
+
+    var docs = (S.data.docs || []).filter(function (d) { return matchAll(d.title + ' ' + (d.name || '') + ' ' + (d.note || '') + ' ' + (S.idx.boards[d.board] ? S.idx.boards[d.board].name : ''), terms); });
+    if (docs.length) groups.push({ name: '인계장 파일', items: docs.slice(0, 8).map(function (d) {
+      return { kind: 'doc', icon: extOf(d), title: d.title, sub: (S.idx.boards[d.board] ? S.idx.boards[d.board].name + ' · ' : '') + (d.note || shortDate(d.at)), run: function () { openDoc(d.id); } };
+    }) });
+    var links = (S.data.config.links || []).filter(function (l) { return matchAll(l.title + ' ' + l.url, terms); });
+    if (links.length) groups.push({ name: '링크', items: links.map(function (l) {
+      return { kind: 'link', icon: l.icon || '🔗', title: l.title, sub: '새 탭에서 열기', run: function () { window.open(l.url, '_blank', 'noopener'); } };
+    }) });
+    return groups;
+  }
+
+  function openPalette(q) {
+    if (!S.data || !S.pw) return;
+    if (PALETTE_UI.open) { PALETTE_UI.el.querySelector('input').select(); return; }
+    var el = document.createElement('div');
+    el.className = 'palette-overlay';
+    el.innerHTML = '<div class="palette" role="dialog" aria-modal="true" aria-label="전체 검색">' +
+      '<div class="palette-input">' + ICON.search + '<input type="search" placeholder="인계, 교수님, 보드, 파일, 링크 검색… (초성도 돼요)" autocomplete="off" spellcheck="false" aria-controls="palette-list">' +
+      '<button class="palette-esc" data-pal="close" aria-label="닫기">esc</button></div>' +
+      '<div class="palette-list" id="palette-list" role="listbox"></div>' +
+      '<div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 이동</span><span><kbd>Enter</kbd> 열기</span><span><kbd>esc</kbd> 닫기</span></div></div>';
+    document.body.appendChild(el);
+    PALETTE_UI.el = el; PALETTE_UI.open = true;
+    document.body.style.overflow = 'hidden';
+    var inp = el.querySelector('input');
+    inp.addEventListener('input', function () { PALETTE_UI.q = inp.value; PALETTE_UI.sel = 0; renderPalette(); });
+    el.addEventListener('mousedown', function (ev) { if (ev.target === el) closePalette(); });
+    el.addEventListener('click', function (ev) {
+      if (ev.target.closest('[data-pal=close]')) return closePalette();
+      var it = ev.target.closest('[data-pi]');
+      if (it) choosePalette(+it.getAttribute('data-pi'));
+    });
+    el.addEventListener('mousemove', function (ev) {
+      var it = ev.target.closest('[data-pi]');
+      if (it && +it.getAttribute('data-pi') !== PALETTE_UI.sel) { PALETTE_UI.sel = +it.getAttribute('data-pi'); markSel(false); }
+    });
+    inp.value = q || '';
+    PALETTE_UI.q = inp.value;
+    renderPalette();
+    inp.focus(); inp.select();
+  }
+  function setPaletteQuery(q) {
+    var inp = PALETTE_UI.el.querySelector('input');
+    inp.value = q; PALETTE_UI.q = q; PALETTE_UI.sel = 0; renderPalette(); inp.focus();
+  }
+  function closePalette() {
+    if (!PALETTE_UI.open) return;
+    PALETTE_UI.el.remove(); PALETTE_UI.open = false; PALETTE_UI.el = null;
+    document.body.style.overflow = '';
+  }
+  function renderPalette() {
+    var groups = paletteItems(PALETTE_UI.q.trim());
+    var flat = [], html = '';
+    groups.forEach(function (g) {
+      html += '<div class="pal-group">' + esc(g.name) + '</div>';
+      g.items.forEach(function (it) {
+        var i = flat.length; flat.push(it);
+        var icon = it.kind === 'entry' ? '<i class="dot" style="background:' + it.color + '"></i>'
+          : it.kind === 'doc' ? '<span class="ext ext-' + String(it.icon).toLowerCase() + '">' + esc(it.icon) + '</span>'
+          : '<span class="pal-icon">' + esc(it.icon) + '</span>';
+        html += '<div class="pal-item" role="option" data-pi="' + i + '">' + icon +
+          '<div class="pal-main"><div class="pal-title">' + hl(it.title, it.kind === 'recent' ? [] : PALETTE_UI.q.toLowerCase().split(/\s+/).filter(Boolean)) + '</div>' +
+          (it.html ? '<div class="pal-snip">' + it.html + '</div>' : '') + '</div>' +
+          (it.sub ? '<span class="pal-sub">' + esc(it.sub) + '</span>' : '') + '</div>';
+      });
+    });
+    if (!flat.length) html = '<div class="pal-empty">"' + esc(PALETTE_UI.q) + '"에 맞는 결과가 없어요. 다른 단어나 초성으로 찾아보세요.</div>';
+    PALETTE_UI.items = flat;
+    var list = PALETTE_UI.el.querySelector('.palette-list');
+    list.innerHTML = html;
+    list.scrollTop = 0;
+    markSel(true);
+  }
+  function markSel(scroll) {
+    var list = PALETTE_UI.el.querySelector('.palette-list');
+    list.querySelectorAll('.pal-item').forEach(function (n) {
+      var on = +n.getAttribute('data-pi') === PALETTE_UI.sel;
+      n.classList.toggle('sel', on); n.setAttribute('aria-selected', on);
+      if (on && scroll) n.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function choosePalette(i) {
+    var it = PALETTE_UI.items[i];
+    if (!it) return;
+    if (it.kind === 'recent') return it.run();
+    var q = PALETTE_UI.q.trim();
+    if (q) {
+      var rec = [];
+      try { rec = JSON.parse(ls('recentq') || '[]'); } catch (e) { rec = []; }
+      rec = [q].concat(rec.filter(function (x) { return x !== q; })).slice(0, 6);
+      ls('recentq', JSON.stringify(rec));
+    }
+    closePalette();
+    it.run();
+  }
+  document.addEventListener('keydown', function (ev) {
+    var k = ev.key;
+    if ((ev.metaKey || ev.ctrlKey) && (k === 'k' || k === 'K')) {
+      ev.preventDefault();
+      if (PALETTE_UI.open) closePalette(); else if (sheet.hidden) openPalette();
+      return;
+    }
+    if (!PALETTE_UI.open) {
+      var tag = (ev.target.tagName || '').toLowerCase();
+      if (k === '/' && sheet.hidden && tag !== 'input' && tag !== 'textarea' && tag !== 'select' && !ev.target.isContentEditable) { ev.preventDefault(); openPalette(); }
+      return;
+    }
+    if (k === 'Escape') { ev.preventDefault(); closePalette(); }
+    else if (k === 'ArrowDown') { ev.preventDefault(); PALETTE_UI.sel = Math.min(PALETTE_UI.sel + 1, PALETTE_UI.items.length - 1); markSel(true); }
+    else if (k === 'ArrowUp') { ev.preventDefault(); PALETTE_UI.sel = Math.max(PALETTE_UI.sel - 1, 0); markSel(true); }
+    else if (k === 'Enter' && !ev.isComposing) { ev.preventDefault(); choosePalette(PALETTE_UI.sel); }
+  }, true);
+
   /* ---------- 동기화 ---------- */
   function maybeRefresh() {
-    if (S.pw && S.role && document.visibilityState === 'visible' && Date.now() - S.lastFetch > 30000 && sheet.hidden && !S.dirty) {
+    if (S.pw && S.role && document.visibilityState === 'visible' && Date.now() - S.lastFetch > 30000 && sheet.hidden && !S.dirty && !PALETTE_UI.open) {
       refresh(true);
     }
   }
