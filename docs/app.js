@@ -53,7 +53,9 @@
         setBusy(false);
         if (!j.ok) {
           if (j.code === 'AUTH' && action !== 'login') { logout(); }
-          throw new Error(j.error || '요청에 실패했습니다.');
+          var msg = j.error || '요청에 실패했습니다.';
+          if (/^알 수 없는 요청입니다/.test(msg)) msg = '서버(Apps Script)가 예전 버전입니다. Code.gs 를 최신으로 바꾸고 저장한 뒤 배포 관리 → 새 버전으로 배포해 주세요.';
+          throw new Error(msg);
         }
         if (j.role && j.role !== S.role && action !== 'login') { S.role = j.role; ls('role', j.role); }
         return j;

@@ -21,6 +21,9 @@ var INITIAL_PASSWORDS = {
 // 처음 등록할 동기 이름 (이후 추가·변경은 화면의 관리자 설정 > 동기에서)
 var INITIAL_MEMBERS = [];
 
+// 배포된 서버 코드가 어떤 버전인지 확인용. 코드를 바꿀 때마다 올린다.
+var BACKEND_VERSION = '2026-11-16.3';
+
 var ENTRY_COLS = ['id', 'scope', 'target', 'section', 'tag', 'text', 'authorId',
   'createdAt', 'updatedAt', 'updatedBy', 'confirmedAt', 'confirmedBy', 'deleted'];
 var PROF_COLS = ['id', 'name', 'boards', 'memo', 'order', 'deleted'];
@@ -34,7 +37,7 @@ var MAX_TEXT = 5000;
 /* ---------- 진입점 ---------- */
 
 function doGet() {
-  return out_({ ok: true, msg: 'handover board api' });
+  return out_({ ok: true, msg: 'handover board api', version: BACKEND_VERSION });
 }
 
 function doPost(e) {
@@ -53,6 +56,7 @@ function doPost(e) {
     var res = route_(req, role) || {};
     res.ok = true;
     res.role = role;
+    res.version = BACKEND_VERSION;
     return out_(res);
   } catch (err) {
     return out_({ ok: false, error: String(err && err.message ? err.message : err) });
