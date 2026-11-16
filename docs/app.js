@@ -21,13 +21,14 @@
     { id: 'sand', name: '모래', hex: '#DCC788' },
     { id: 'steel', name: '청회색', hex: '#9DB4CC' }
   ];
-  var PAL = {};
+  var ANON = { id: 'anon', name: '익명', color: 'anon' };
+  var PAL = { anon: '#D5DBD9' };
   PALETTE.forEach(function (p) { PAL[p.id] = p.hex; });
 
   var S = {
     pw: ls('pw'), role: ls('role'), me: ls('me'),
     data: null, idx: null, lastFetch: 0, busy: false,
-    draft: null, adminTab: 'basic', dirty: false, q: ''
+    draft: null, adminTab: 'basic', dirty: false, q: '', scrollSec: true
   };
   try { S.data = JSON.parse(ls('cache') || 'null'); } catch (e) { S.data = null; }
   var collapsed = {};
@@ -64,7 +65,7 @@
 
   function refresh(silent) {
     return api('getAll').then(function (j) {
-      S.data = { config: j.config, profs: j.profs, entries: j.entries };
+      S.data = { config: j.config, profs: j.profs, entries: j.entries, docs: j.docs || [] };
       S.lastFetch = Date.now();
       ls('cache', JSON.stringify(S.data));
       buildIndex();
@@ -75,7 +76,13 @@
   /* ---------- 인덱스 ---------- */
   function buildIndex() {
     var d = S.data;
-    var I = { boards: {}, profs: {}, members: {}, byTarget: {}, counts: {}, last: {}, tags: {} };
+    var I = { boards: {}, profs: {}, members: {}, byTarget: {}, counts: {}, last: {}, tags: {}, docs: {} };
+    I.members[ANON.id] = ANON;
+    (d.docs || []).slice().sort(function (a, b) { return a.at < b.at ? 1 : -1; }).forEach(function (doc) {
+      var bd = I.docs[doc.board] = I.docs[doc.board] || { order: [], slots: {} };
+      if (!bd.slots[doc.slot]) { bd.slots[doc.slot] = []; bd.order.push(doc.slot); }
+      bd.slots[doc.slot].push(doc);
+    });
     d.config.boards.forEach(function (b) { I.boards[b.id] = b; });
     d.profs.forEach(function (p) { I.profs[p.id] = p; });
     d.config.members.forEach(function (m) { I.members[m.id] = m; });
@@ -104,6 +111,25 @@
   function nameOf(memberId) {
     var m = S.idx && S.idx.members[memberId];
     return m ? m.name : '알 수 없음';
+  }
+  function initialOf(memberId) { return memberId === 'anon' ? '?' : nameOf(memberId).slice(0, 1); }
+  function fmtSize(n) {
+    n = +n || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + 'MB';
+    if (n >= 1024) return Math.round(n / 1024) + 'KB';
+    return n ? n + 'B' : '';
+  }
+  function extOf(doc) {
+    if (doc.kind === 'link') return 'LINK';
+    var m = String(doc.name || '').match(/\.([a-z0-9]+)$/i);
+    return m ? m[1].toUpperCase().slice(0, 4) : 'FILE';
+  }
+  function snippet(text) {
+    return String(text || '').replace(/\*\*/g, '').replace(/^\s*[-•·*]\s+/gm, '').replace(/\s+/g, ' ').trim();
+  }
+  function shortDate(iso) {
+    var d = new Date(iso);
+    return (d.getMonth() + 1) + '.' + d.getDate();
   }
   function canWrite() { return S.role === 'member' || S.role === 'admin'; }
   function isAdmin() { return S.role === 'admin'; }
@@ -178,14 +204,14 @@
   /* ---------- 라우팅 ---------- */
   function parseRoute() {
     var h = (location.hash || '#/').slice(1).split('/').filter(Boolean);
-    return { name: h[0] || 'home', id: h[1] ? decodeURIComponent(h[1]) : null, sub: h[2] || null };
+    return { name: h[0] || 'home', id: h[1] ? decodeURIComponent(h[1]) : null, sub: h[2] || null, third: h[3] ? decodeURIComponent(h[3]) : null };
   }
   window.addEventListener('hashchange', function () {
     if (S.dirty && parseRoute().name !== 'admin' && !confirm('저장하지 않은 설정 변경이 있습니다. 나갈까요?')) {
       history.back(); return;
     }
     if (parseRoute().name !== 'admin') { S.dirty = false; S.draft = null; }
-    render(); window.scrollTo(0, 0);
+    S.scrollSec = true; window.scrollTo(0, 0); render();
   });
 
   /* ---------- 렌더 ---------- */
@@ -211,8 +237,13 @@
     }
     app.innerHTML =
       '<div class="shell">' + topbar(r) +
-      '<div class="layout">' + sidebar(r) + '<main class="main" id="main">' + body + '</main></div>' +
+      '<div class="layout">' + sidebar(r) + '<main class="main' + (r.name === 'home' ? ' main-wide' : '') + '" id="main">' + body + '</main></div>' +
       fab(r) + '</div>';
+    if (r.name === 'b' && r.sub === 's' && r.third && S.scrollSec) {
+      S.scrollSec = false;
+      var el = document.getElementById('sec-' + r.third);
+      if (el) { el.classList.remove('collapsed'); setTimeout(function () { el.scrollIntoView({ block: 'start' }); }, 0); }
+    }
     if (r.name === 'search') {
       var inp = document.getElementById('q');
       if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
@@ -228,7 +259,7 @@
   function topbar(r) {
     var me = S.role === 'viewer'
       ? '<button class="icon-btn" data-act="menu" aria-label="메뉴"><span class="avatar" style="background:#DCE3E1">👀</span></button>'
-      : '<button class="icon-btn" data-act="menu" aria-label="메뉴"><span class="avatar" style="background:' + colorOf(S.me) + '">' + esc(nameOf(S.me).slice(0, 1)) + '</span></button>';
+      : '<button class="icon-btn" data-act="menu" aria-label="메뉴"><span class="avatar" style="background:' + colorOf(S.me) + '">' + esc(initialOf(S.me)) + '</span></button>';
     return '<header class="topbar"><div class="topbar-row">' +
       '<a class="brand" href="#/"><span class="brand-mark">' +
       stripes(4).map(function (c) { return '<i style="background:' + c + '"></i>'; }).join('') +
@@ -308,8 +339,10 @@
       '<div class="who-grid">' + ms.map(function (m) {
         return '<button class="who-btn" data-act="pick-me" data-id="' + esc(m.id) + '" aria-pressed="' + (S.me === m.id) + '">' +
           '<span class="avatar" style="background:' + PAL[m.color] + '">' + esc(m.name.slice(0, 1)) + '</span>' + esc(m.name) + '</button>';
-      }).join('') + '</div>' +
-      (ms.length ? '' : '<p class="muted">등록된 동기가 없습니다. 관리자에게 이름 추가를 요청하세요.</p>') +
+      }).join('') +
+      '<button class="who-btn" data-act="pick-me" data-id="anon" aria-pressed="' + (S.me === 'anon') + '"><span class="avatar" style="background:' + PAL.anon + '">?</span>익명</button>' +
+      '</div>' +
+      '<p class="hint" style="margin-top:12px">익명으로 고르면 쓴 글에 이름 대신 "익명"이 표시됩니다.</p>' +
       '</div></div>';
   }
 
@@ -321,7 +354,7 @@
     var edited = e.updatedAt && e.updatedAt !== e.createdAt;
     var crumb = opts.crumb ? '<a class="msg-crumb" href="' + crumbHref(e) + '">' + esc(crumbText(e)) + '</a>' : '';
     return '<div class="msg' + (stale ? ' stale' : '') + '">' +
-      '<span class="avatar" style="background:' + c + '" aria-hidden="true">' + esc(nameOf(e.authorId).slice(0, 1)) + '</span>' +
+      '<span class="avatar" style="background:' + c + '" aria-hidden="true">' + esc(initialOf(e.authorId)) + '</span>' +
       '<div><div class="msg-meta">' +
       '<span class="name-label" style="background:' + c + '">' + esc(nameOf(e.authorId)) + '</span>' +
       '<span class="msg-time" title="' + esc(e.createdAt) + '">' + ago(e.createdAt) + '</span>' +
@@ -363,7 +396,7 @@
           return '<div class="tag-group"><span class="tag-title">' + esc(t) + '</span>' + tagged[t].map(function (e) { return msg(e); }).join('') + '</div>';
         }).join('');
       if (!items.length) body = '<div class="empty-line">' + (canWrite() ? '아직 없어요. 처음 아는 걸 남겨주세요.' : '아직 없어요.') + '</div>';
-      return '<section class="section' + (isCol ? ' collapsed' : '') + '">' +
+      return '<section class="section' + (isCol ? ' collapsed' : '') + '" id="sec-' + esc(s.id) + '">' +
         '<div class="section-head"><button class="section-toggle" data-act="toggle" data-key="' + esc(key) + '" aria-expanded="' + !isCol + '">' +
         '<h2>' + esc(s.name) + '</h2><span class="count">' + items.length + '</span><span class="caret">▼</span></button>' +
         (canWrite() && s.id !== '__none' ? '<button class="add-link" data-act="compose" data-scope="' + scope + '" data-target="' + esc(target) + '" data-section="' + esc(s.id) + '">추가</button>' : '') +
@@ -374,20 +407,62 @@
 
   /* ---------- 화면: 홈 ---------- */
   function viewHome() {
-    var since = Date.now() - 14 * 86400000;
-    var recent = S.data.entries.filter(function (e) { return new Date(e.updatedAt).getTime() > since; })
-      .sort(function (a, b) { return a.updatedAt < b.updatedAt ? 1 : -1; }).slice(0, 40);
-    var tiles = S.data.config.boards.map(function (b) {
-      var n = S.idx.counts['board|' + b.id] || 0;
-      var last = S.idx.last['board|' + b.id];
-      return '<a class="board-tile" href="#/b/' + b.id + '"><b>' + esc(b.name) + '</b><span>' + n + '개' + (last ? ' · ' + ago(last) : '') + '</span></a>';
+    var cfg = S.data.config;
+    var links = cfg.links || [];
+    var linkHtml = '<section class="home-block"><div class="block-head"><h2>자주 쓰는 링크</h2>' +
+      (isAdmin() ? '<a class="add-link" href="#/admin" data-act="goto-links">편집</a>' : '') + '</div>' +
+      (links.length ? '<div class="links-grid">' + links.map(function (l) {
+        return '<a class="link-tile" href="' + esc(l.url) + '" target="_blank" rel="noopener">' +
+          '<span class="link-icon" aria-hidden="true">' + esc(l.icon || '🔗') + '</span><span class="link-title">' + esc(l.title) + '</span></a>';
+      }).join('') + '</div>'
+        : '<div class="empty-line">' + (isAdmin() ? '관리자 설정 → 링크에서 추가하세요.' : '아직 등록된 링크가 없어요.') + '</div>') + '</section>';
+
+    var groups = '<section class="home-block"><div class="block-head"><h2>전체 보드</h2></div><div class="ov-grid">' +
+      cfg.boards.map(overviewCard).join('') + '</div></section>';
+
+    var recent = S.data.entries.slice().sort(function (a, b) { return a.updatedAt < b.updatedAt ? 1 : -1; }).slice(0, 8);
+    var recentHtml = recent.length ? '<section class="home-block"><div class="block-head"><h2>최근 업데이트</h2><a class="add-link" href="#/search">전체 검색</a></div><div class="list">' +
+      recent.map(function (e) {
+        return '<a class="list-row recent-row" href="' + crumbHref(e) + '"><i class="dot" style="background:' + colorOf(e.authorId) + '"></i>' +
+          '<span class="recent-text"><b>' + esc(crumbText(e)) + '</b><span>' + esc(snippet(e.text)) + '</span></span>' +
+          '<span class="sub">' + ago(e.updatedAt) + '</span></a>';
+      }).join('') + '</div></section>' : '';
+
+    var who = S.role === 'viewer' ? '' : nameOf(S.me) + ', ';
+    return '<div class="page-head"><div class="eyebrow">' + esc(who) + '안녕하세요</div><h1>' + esc(cfg.title || '인계보드') + '</h1>' +
+      '<p>인계 ' + S.data.entries.length + '개 · 교수님 ' + S.data.profs.length + '분 · 인계장 파일 ' + countSlots() + '개</p></div>' +
+      linkHtml + groups + recentHtml;
+  }
+  function countSlots() {
+    var n = 0;
+    Object.keys(S.idx.docs).forEach(function (b) { n += S.idx.docs[b].order.length; });
+    return n;
+  }
+  function overviewCard(b) {
+    var k = 'board|' + b.id;
+    var list = S.idx.byTarget[k] || [];
+    var n = S.idx.counts[k] || 0, last = S.idx.last[k];
+    var docs = S.idx.docs[b.id];
+    var docHtml = docs ? docs.order.map(function (slot) {
+      var d = docs.slots[slot][0];
+      return '<button class="ov-doc" data-act="doc-open" data-id="' + esc(d.id) + '"><span class="ext ext-' + extOf(d).toLowerCase() + '">' + esc(extOf(d)) + '</span>' +
+        '<span class="ov-doc-title">' + esc(d.title) + '</span><span class="sub">' + shortDate(d.at) + '</span></button>';
+    }).join('') : '';
+    var secs = b.sections.map(function (s) {
+      var items = list.filter(function (e) { return e.section === s.id; });
+      if (!items.length) return '';
+      var latest = items.slice().sort(function (a, c) { return a.updatedAt < c.updatedAt ? 1 : -1; })[0];
+      return '<li><a href="#/b/' + esc(b.id) + '/s/' + esc(s.id) + '"><span class="ov-sec">' + esc(s.name) + '</span>' +
+        (latest ? '<span class="ov-snip"><i class="dot" style="background:' + colorOf(latest.authorId) + '"></i>' + esc(snippet(latest.text)) + '</span>'
+          : '<span class="ov-snip ov-empty">비어 있음</span>') +
+        '<span class="ov-n">' + (items.length || '') + '</span></a></li>';
     }).join('');
-    var name = S.role === 'viewer' ? '' : nameOf(S.me) + ', ';
-    return '<div class="page-head"><div class="eyebrow">' + esc(name) + '안녕하세요</div><h1>최근 2주 동안 올라온 인계</h1>' +
-      '<p>전체 ' + S.data.entries.length + '개 · 교수님 ' + S.data.profs.length + '분</p></div>' +
-      '<div class="board-grid">' + tiles + '</div>' +
-      (recent.length ? recent.map(function (e) { return msg(e, { crumb: true }); }).join('')
-        : '<div class="empty-line">최근 2주 동안 새 인계가 없어요. 보드를 골라 하나 남겨보세요.</div>');
+    var pc = boardProfs(b.id).length;
+    if (!secs) secs = '<li class="ov-none">아직 인계 없음</li>';
+    return '<article class="ov-card"><a class="ov-head" href="#/b/' + esc(b.id) + '"><span><small class="ov-group">' + esc(b.group || '') + '</small><b>' + esc(b.name) + '</b></span>' +
+      '<span class="sub">' + n + '개' + (last ? ' · ' + ago(last) : '') + '</span></a>' +
+      docHtml + '<ul class="ov-secs">' + secs + '</ul>' +
+      (pc ? '<a class="ov-prof" href="#/b/' + esc(b.id) + '/prof">교수님 ' + pc + '분 보기</a>' : '') + '</article>';
   }
 
   /* ---------- 화면: 보드 ---------- */
@@ -404,8 +479,25 @@
   function viewBoard(id) {
     var b = S.idx.boards[id];
     return '<div class="page-head"><div class="eyebrow">' + esc(b.group || '') + '</div><h1>' + esc(b.name) + '</h1></div>' +
-      boardSeg(b, null) + sectionsView('board', id, b.sections);
+      boardSeg(b, null) + docsBlock(id) + sectionsView('board', id, b.sections);
   }
+  function docsBlock(boardId) {
+    var docs = S.idx.docs[boardId];
+    if (!docs && !canWrite()) return '';
+    var cards = docs ? docs.order.map(function (slot) {
+      var vs = docs.slots[slot], d = vs[0];
+      var meta = [d.kind === 'link' ? '링크' : fmtSize(d.size), nameOf(d.by), ago(d.at)].filter(String).join(' · ');
+      return '<div class="doc-card"><span class="ext ext-' + extOf(d).toLowerCase() + '">' + esc(extOf(d)) + '</span>' +
+        '<div class="doc-main"><b>' + esc(d.title) + '</b><span class="sub">' + esc(meta) + (vs.length > 1 ? ' · 이전 버전 ' + (vs.length - 1) + '개' : '') + '</span>' +
+        (d.note ? '<span class="doc-note">' + esc(d.note) + '</span>' : '') + '</div>' +
+        '<div class="doc-actions"><button class="btn btn-sm btn-primary" data-act="doc-open" data-id="' + esc(d.id) + '">열기</button>' +
+        '<button class="btn btn-sm" data-act="doc-more" data-board="' + esc(boardId) + '" data-slot="' + esc(slot) + '">더보기</button></div></div>';
+    }).join('') : '';
+    return '<section class="docs-block"><div class="section-head"><div class="section-toggle"><h2>인계장 파일</h2><span class="count">' + (docs ? docs.order.length : 0) + '</span></div>' +
+      (canWrite() ? '<button class="add-link" data-act="doc-upload" data-board="' + esc(boardId) + '">올리기</button>' : '') + '</div>' +
+      (cards || '<div class="empty-line">hwp, pdf, pptx, docx 같은 긴 인계장 파일을 올려두면 여기서 바로 열 수 있어요.</div>') + '</section>';
+  }
+
   function profRows(list) {
     if (!list.length) return '';
     return '<div class="list">' + list.map(function (p) {
@@ -511,6 +603,7 @@
       '<div class="hint">같은 이름끼리 섹션 안에서 묶여 보입니다.</div></label>' +
       '<label class="field"><span>내용</span><textarea class="textarea" name="text" required maxlength="5000" autofocus placeholder="한 가지씩 짧게 남기면 찾기 쉬워요.">' + esc(entry ? entry.text : '') + '</textarea>' +
       '<div class="hint">**굵게** · 줄 앞에 "- " 를 쓰면 목록 · Ctrl/⌘+Enter 저장</div></label>' +
+      (!entry && S.me !== 'anon' ? '<label class="check" style="margin:0 0 14px"><input type="checkbox" name="anon">익명으로 올리기</label>' : '') +
       '<div class="sheet-actions"><button class="btn" type="button" data-act="close">취소</button>' +
       '<button class="btn btn-primary" type="submit">' + (entry ? '수정 저장' : '추가') + '</button></div></form>');
   }
@@ -570,11 +663,116 @@
       '<button class="btn" type="button" data-act="close">취소</button><button class="btn btn-primary" type="submit">저장</button></div></form>');
   }
 
+  /* ---------- 인계장 파일 ---------- */
+  var MAX_UPLOAD = 25 * 1024 * 1024;
+  function findDoc(id) { return (S.data.docs || []).filter(function (x) { return x.id === id; })[0]; }
+
+  function openDocUpload(boardId, slot) {
+    var cur = slot && S.idx.docs[boardId] ? S.idx.docs[boardId].slots[slot][0] : null;
+    var now = new Date();
+    var defNote = now.getFullYear() + '년 ' + (now.getMonth() + 1) + '월 업데이트';
+    openSheet('<form id="doc-form" data-board="' + esc(boardId) + '"' + (slot ? ' data-slot="' + esc(slot) + '"' : '') + ' data-mode="file">' +
+      '<h2 class="sheet-title">' + (cur ? '새 버전으로 교체' : esc(S.idx.boards[boardId].name) + ' 인계장 올리기') + '</h2>' +
+      (cur ? '<p class="muted" style="margin:-8px 0 14px;font-size:14px">지금 버전(' + esc(cur.title) + ', ' + shortDate(cur.at) + ')은 이전 버전으로 남습니다.</p>' : '') +
+      '<div class="seg" style="margin:0 0 14px"><a href="javascript:void 0" data-act="doc-mode" data-mode="file" aria-current="page">파일 올리기</a><a href="javascript:void 0" data-act="doc-mode" data-mode="link">링크로 등록</a></div>' +
+      '<label class="field doc-file"><span>파일 (25MB 이하)</span><input class="input" type="file" name="file" required accept=".pdf,.hwp,.hwpx,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.png,.jpg,.jpeg"></label>' +
+      '<label class="field doc-url"><span>주소</span><input class="input" type="url" name="url" placeholder="https://drive.google.com/…"></label>' +
+      '<label class="field"><span>제목</span><input class="input" name="title" maxlength="100" value="' + esc(cur ? cur.title : '') + '" placeholder="비우면 파일 이름"></label>' +
+      '<label class="field"><span>메모 (선택)</span><input class="input" name="note" maxlength="200" value="' + esc(defNote) + '"></label>' +
+      '<div class="upload-status muted" style="font-size:14px;min-height:1em;margin:-4px 0 10px"></div>' +
+      '<div class="sheet-actions"><button class="btn" type="button" data-act="close">취소</button><button class="btn btn-primary" type="submit">' + (cur ? '교체' : '올리기') + '</button></div></form>');
+  }
+
+  function submitDoc(f) {
+    var btn = f.querySelector('[type=submit]');
+    var status = f.querySelector('.upload-status');
+    var mode = f.getAttribute('data-mode');
+    var base = { board: f.getAttribute('data-board'), slot: f.getAttribute('data-slot') || '', title: f.querySelector('[name=title]').value.trim(), note: f.querySelector('[name=note]').value.trim() };
+    var done = function (j) {
+      S.data.docs = (S.data.docs || []).concat([j.doc]);
+      afterLocalChange(); closeSheet(); toast(base.slot ? '새 버전으로 바꿨어요.' : '올렸어요.');
+    };
+    var fail = function (e) { btn.disabled = false; status.textContent = ''; toast(e.message); };
+    if (mode === 'link') {
+      base.url = f.querySelector('[name=url]').value.trim();
+      btn.disabled = true;
+      return api('addDocLink', { doc: base }).then(done, fail);
+    }
+    var file = f.querySelector('[name=file]').files[0];
+    if (!file) return toast('파일을 고르세요.');
+    if (file.size > MAX_UPLOAD) return toast('25MB 이하 파일만 올릴 수 있어요.');
+    btn.disabled = true;
+    status.textContent = '올리는 중… (' + fmtSize(file.size) + ')';
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data = String(reader.result).split(',')[1] || '';
+      base.name = file.name; base.mime = file.type || 'application/octet-stream'; base.data = data;
+      api('uploadDoc', { doc: base }).then(done, fail);
+    };
+    reader.onerror = function () { fail(new Error('파일을 읽지 못했어요.')); };
+    reader.readAsDataURL(file);
+  }
+
+  function openDocMore(boardId, slot) {
+    var vs = S.idx.docs[boardId].slots[slot], d = vs[0];
+    openSheet('<h2 class="sheet-title">' + esc(d.title) + '</h2>' +
+      '<div class="action-list">' +
+      (canWrite() ? '<button class="btn" data-act="doc-replace" data-board="' + esc(boardId) + '" data-slot="' + esc(slot) + '">새 버전으로 교체</button>' : '') +
+      '</div>' +
+      '<div class="list-heading">버전 ' + vs.length + '개</div><div class="list">' + vs.map(function (v, i) {
+        return '<div class="list-row"><span class="ext ext-' + extOf(v).toLowerCase() + '">' + esc(extOf(v)) + '</span>' +
+          '<span class="title" style="font-weight:600">' + (i === 0 ? '현재 · ' : '') + esc(v.note || v.title) +
+          '<span class="sub" style="display:block;font-weight:400">' + esc([v.name, fmtSize(v.size), nameOf(v.by), new Date(v.at).toLocaleDateString('ko-KR')].filter(String).join(' · ')) + '</span></span>' +
+          '<button class="btn btn-sm" data-act="doc-open" data-id="' + esc(v.id) + '">열기</button>' +
+          (canWrite() ? '<button class="mini" data-act="doc-delete" data-id="' + esc(v.id) + '" aria-label="이 버전 삭제">✕</button>' : '') + '</div>';
+      }).join('') + '</div>' +
+      '<div class="sheet-actions" style="margin-top:14px"><button class="btn" data-act="close">닫기</button></div>');
+  }
+
+  function openDoc(id, el) {
+    var d = findDoc(id);
+    if (!d) return;
+    if (d.url) { window.open(d.url, '_blank', 'noopener'); return; }
+    if (el) el.disabled = true;
+    toast('파일을 받는 중…');
+    api('docData', { id: id }).then(function (j) {
+      if (el) el.disabled = false;
+      var bin = atob(j.data), arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      var url = URL.createObjectURL(new Blob([arr], { type: j.mime || 'application/octet-stream' }));
+      var a = document.createElement('a');
+      a.href = url; a.download = j.name || 'file';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+    }).catch(function (e) { if (el) el.disabled = false; toast(e.message); });
+  }
+
+  function parseLinks(text) {
+    var out = [], title = null;
+    String(text || '').split(/\r?\n/).forEach(function (ln) {
+      var t = ln.trim();
+      if (!t) return;
+      var m = t.match(/https?:\/\/\S+/);
+      if (m) {
+        var before = t.slice(0, m.index).trim();
+        var name = before || title || m[0].replace(/^https?:\/\//, '').slice(0, 40);
+        var icon = '';
+        var em = name.match(/^(\p{Extended_Pictographic}️?)\s*/u);
+        if (em) { icon = em[1]; name = name.slice(em[0].length); }
+        out.push({ id: rid('l'), icon: icon || '🔗', title: name.trim(), url: m[0] });
+        title = null;
+      } else {
+        title = t;
+      }
+    });
+    return out;
+  }
+
   /* ---------- 관리자 ---------- */
   function viewAdmin() {
     if (!S.draft) S.draft = clone(S.data.config);
     var d = S.draft, tab = S.adminTab;
-    var tabs = [['basic', '기본'], ['members', '동기'], ['boards', '보드'], ['profsec', '교수님 섹션'], ['profs', '교수님 명단'], ['pw', '비밀번호']];
+    var tabs = [['basic', '기본'], ['links', '링크'], ['members', '동기'], ['boards', '보드'], ['profsec', '교수님 섹션'], ['profs', '교수님 명단'], ['pw', '비밀번호']];
     var out = '<div class="page-head"><h1>관리자 설정</h1><p>구조 변경은 아래 "설정 저장"을 눌러야 모두에게 반영됩니다.</p></div>' +
       '<div class="admin-tabs">' + tabs.map(function (t) {
         return '<button class="chip-nav" data-act="admin-tab" data-tab="' + t[0] + '"' + (tab === t[0] ? ' aria-current="page"' : '') + '>' + t[1] + '</button>';
@@ -582,6 +780,19 @@
 
     if (tab === 'basic') {
       out += '<div class="admin-card"><label class="field"><span>보드 이름</span><input class="input" data-bind="title" value="' + esc(d.title || '') + '"></label></div>';
+    } else if (tab === 'links') {
+      if (!d.links) d.links = [];
+      out += '<div class="admin-card"><h3>홈 링크</h3>' + d.links.map(function (l, i) {
+        return '<div class="edit-row link-edit"><input class="input" style="width:52px;text-align:center" data-bind="links.' + i + '.icon" value="' + esc(l.icon || '') + '" placeholder="🔗" maxlength="4">' +
+          '<div class="grow" style="display:grid;gap:4px"><input class="input" data-bind="links.' + i + '.title" value="' + esc(l.title) + '" placeholder="이름">' +
+          '<input class="input" data-bind="links.' + i + '.url" value="' + esc(l.url) + '" placeholder="https://" inputmode="url"></div>' +
+          '<button class="mini" data-act="move" data-list="links" data-i="' + i + '" data-d="-1"' + (i === 0 ? ' disabled' : '') + ' aria-label="위로">↑</button>' +
+          '<button class="mini" data-act="move" data-list="links" data-i="' + i + '" data-d="1"' + (i === d.links.length - 1 ? ' disabled' : '') + ' aria-label="아래로">↓</button>' +
+          '<button class="mini" data-act="remove-link" data-i="' + i + '" aria-label="삭제">✕</button></div>';
+      }).join('') + '<button class="btn btn-sm" data-act="add-link-row">링크 추가</button></div>' +
+        '<div class="admin-card"><h3>한꺼번에 붙여넣기</h3><textarea class="textarea" id="bulk-links" placeholder="🗂️ 이름&#10;https://…&#10;🗂️ 다른 이름&#10;https://…"></textarea>' +
+        '<div class="hint">이름 줄 다음에 주소 줄이 오는 형식이면 됩니다. 이미 있는 주소는 건너뜁니다.</div>' +
+        '<p><button class="btn btn-sm" data-act="bulk-links">목록에 추가</button></p></div>';
     } else if (tab === 'members') {
       out += '<div class="admin-card"><h3>동기</h3>' + d.members.map(function (m, i) {
         return '<div class="edit-row"><span class="swatch" style="background:' + PAL[m.color] + '"></span>' +
@@ -755,6 +966,38 @@
           : '"' + list[ri].name + '" 섹션을 삭제할까요?' + (n ? ' 인계 ' + n + '개는 "섹션 없음"으로 옮겨 보입니다.' : '');
         if (!confirm(msgTxt)) return;
         list.splice(ri, 1); markDirty(); rerenderAdmin(); break;
+      case 'add-link-row':
+        S.draft.links = S.draft.links || [];
+        S.draft.links.push({ id: rid('l'), icon: '🔗', title: '', url: '' });
+        markDirty(); rerenderAdmin(); break;
+      case 'remove-link':
+        S.draft.links.splice(+el.getAttribute('data-i'), 1); markDirty(); rerenderAdmin(); break;
+      case 'bulk-links':
+        var added = parseLinks(document.getElementById('bulk-links').value).filter(function (l) {
+          return !(S.draft.links || []).some(function (x) { return x.url === l.url; });
+        });
+        S.draft.links = (S.draft.links || []).concat(added);
+        if (added.length) markDirty();
+        rerenderAdmin(); toast(added.length + '개를 추가했어요. "설정 저장"을 눌러야 반영됩니다.'); break;
+      case 'goto-links': S.adminTab = 'links'; break;
+      case 'doc-upload': openDocUpload(el.getAttribute('data-board')); break;
+      case 'doc-replace': openDocUpload(el.getAttribute('data-board'), el.getAttribute('data-slot')); break;
+      case 'doc-more': openDocMore(el.getAttribute('data-board'), el.getAttribute('data-slot')); break;
+      case 'doc-open': openDoc(id, el); break;
+      case 'doc-delete':
+        if (!confirm('이 버전을 삭제할까요? 드라이브 휴지통으로 이동합니다.')) return;
+        api('deleteDoc', { id: id }).then(function () {
+          S.data.docs = S.data.docs.filter(function (x) { return x.id !== id; });
+          afterLocalChange(); closeSheet(); toast('삭제했어요.');
+        }).catch(function (err) { toast(err.message); });
+        break;
+      case 'doc-mode':
+        var form = el.closest('form');
+        form.setAttribute('data-mode', el.getAttribute('data-mode'));
+        form.querySelectorAll('[data-act=doc-mode]').forEach(function (b) { b.setAttribute('aria-current', b === el ? 'page' : 'false'); });
+        form.querySelector('[name=file]').required = el.getAttribute('data-mode') === 'file';
+        form.querySelector('[name=url]').required = el.getAttribute('data-mode') === 'link';
+        break;
       case 'admin-reset':
         S.draft = clone(S.data.config); S.dirty = false; rerenderAdmin(); break;
       case 'admin-save': saveConfig(el); break;
@@ -786,6 +1029,7 @@
     if (f.id === 'gate') return doLogin(f);
     if (f.id === 'composer') return submitComposer(f);
     if (f.id === 'prof-form') return submitProf(f);
+    if (f.id === 'doc-form') return submitDoc(f);
     if (f.getAttribute('data-pwform')) return submitPw(f);
   });
 
@@ -826,7 +1070,7 @@
     var id = f.getAttribute('data-id');
     var p = id
       ? api('updateEntry', { id: id, text: fd.get('text'), section: fd.get('section'), tag: fd.get('tag') })
-      : api('addEntry', { entry: { scope: f.getAttribute('data-scope'), target: f.getAttribute('data-target'), section: fd.get('section'), tag: fd.get('tag'), text: fd.get('text') } });
+      : api('addEntry', { by: fd.get('anon') ? 'anon' : S.me, entry: { scope: f.getAttribute('data-scope'), target: f.getAttribute('data-target'), section: fd.get('section'), tag: fd.get('tag'), text: fd.get('text') } });
     p.then(function (j) {
       upsertEntry(j.entry); closeSheet(); toast(id ? '수정했어요.' : '추가했어요.');
       var sk = j.entry.scope + '|' + j.entry.target + '|' + j.entry.section;
@@ -865,6 +1109,8 @@
       d.boards[i].sections = d.boards[i].sections.filter(function (s) { return s.name.trim(); });
     }
     d.profSections = d.profSections.filter(function (s) { return s.name.trim(); });
+    d.links = (d.links || []).filter(function (l) { return l.title.trim() && /^https?:\/\//.test(l.url.trim()); });
+    d.links.forEach(function (l) { l.title = l.title.trim(); l.url = l.url.trim(); if (!l.id) l.id = rid('l'); });
     btn.disabled = true;
     api('saveConfig', { config: d }).then(function (j) {
       S.data.config = j.config; S.draft = clone(j.config); S.dirty = false;

@@ -59,10 +59,24 @@ const ctx = {
   Utilities: {
     DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' },
     computeDigest: (alg, s) => Array.from(crypto.createHash('sha256').update(s, 'utf8').digest()).map(b => (b > 127 ? b - 256 : b)),
-    getUuid: () => crypto.randomUUID(), sleep: () => {}
+    getUuid: () => crypto.randomUUID(), sleep: () => {},
+    base64Decode: s => Array.from(Buffer.from(s, 'base64')),
+    base64Encode: b => Buffer.from(b.map(x => x & 255)).toString('base64'),
+    newBlob: (bytes, mime, name) => ({ getBytes: () => bytes, getContentType: () => mime, getName: () => name })
   },
+  DriveApp: (() => {
+    const files = {}, folders = {};
+    const mkFile = (blob) => { const id = 'f' + crypto.randomUUID().slice(0, 8); const f = { id, blob, trashed: false,
+      getId: () => id, setSharing() {}, getBlob: () => blob, setTrashed(t) { this.trashed = t; } }; files[id] = f; return f; };
+    return {
+      Access: { ANYONE_WITH_LINK: 'link' }, Permission: { VIEW: 'view' },
+      createFolder: n => { const id = 'd' + crypto.randomUUID().slice(0, 8); folders[id] = { getId: () => id, createFile: mkFile }; return folders[id]; },
+      getFolderById: id => { if (!folders[id]) throw new Error('no folder'); return folders[id]; },
+      getFileById: id => { if (!files[id]) throw new Error('no file'); return files[id]; }
+    };
+  })(),
   ContentService: { MimeType: { JSON: 'json' }, createTextOutput: s => ({ s, setMimeType() { return this; } }) },
-  console
+  console, Logger: { log: m => console.log("[Logger]", m) }
 };
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../backend/Code.gs'), 'utf8'), ctx);
@@ -70,6 +84,12 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../backend/Code.gs'), 'utf
 const PW = { admin: 'admin-1234', member: 'dongi-1234', viewer: 'view-1234' };
 ctx.INITIAL_PASSWORDS = PW;
 vm.runInContext('INITIAL_PASSWORDS = ' + JSON.stringify(PW) + '; INITIAL_MEMBERS = ["현식","이연","가을","민수","한결","순영","지수","문정"]; setup();', ctx);
+
+if (process.env.IMPORT_FILE) {
+  vm.runInContext(fs.readFileSync(process.env.IMPORT_FILE, 'utf8'), ctx);
+  console.log('import added', vm.runInContext('importInitialData()', ctx));
+  console.log('second run added', vm.runInContext('importInitialData()', ctx));
+}
 
 function call(body) { return JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).s); }
 

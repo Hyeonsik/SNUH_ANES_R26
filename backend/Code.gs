@@ -7,6 +7,7 @@
  *      (이 코드는 반드시 구글 시트 안에서 확장 프로그램 → Apps Script 로 연 프로젝트에 붙여넣는다.
  *       script.google.com 에서 새로 만든 독립 프로젝트에서는 동작하지 않는다.)
  *   2) 상단 함수 선택에서 setup 을 고르고 ▶ 실행 (권한 승인).
+ *      권한 승인 화면에는 "이 스프레드시트"와 "이 앱이 만든 드라이브 파일"만 보인다(appsscript.json 참고).
  *   3) 배포 → 새 배포 → 웹 앱 / 실행: 나 / 액세스: 모든 사용자 → URL 복사.
  *   4) 실행이 끝나면 INITIAL_PASSWORDS 는 지워도 된다(비밀번호는 해시로만 저장됨).
  *      이후 비밀번호 변경은 화면의 관리자 설정에서 한다.
@@ -24,6 +25,9 @@ var ENTRY_COLS = ['id', 'scope', 'target', 'section', 'tag', 'text', 'authorId',
   'createdAt', 'updatedAt', 'updatedBy', 'confirmedAt', 'confirmedBy', 'deleted'];
 var PROF_COLS = ['id', 'name', 'boards', 'memo', 'order', 'deleted'];
 var HIST_COLS = ['ts', 'entryId', 'action', 'by', 'before', 'after'];
+var DOC_COLS = ['id', 'board', 'slot', 'title', 'kind', 'fileId', 'url', 'name', 'mime', 'size', 'note', 'by', 'at', 'deleted'];
+var MAX_FILE = 25 * 1024 * 1024;
+var FOLDER_NAME = '인계보드 파일';
 var LEVEL = { viewer: 1, member: 2, admin: 3 };
 var MAX_TEXT = 5000;
 
@@ -68,6 +72,10 @@ function route_(req, role) {
     case 'saveProfessor': need_(role, 'admin'); return locked_(function () { return saveProfessor_(req); });
     case 'deleteProfessor': need_(role, 'admin'); return locked_(function () { return deleteProfessor_(req); });
     case 'setPassword': need_(role, 'admin'); return setPassword_(req);
+    case 'uploadDoc': need_(role, 'member'); return uploadDoc_(req);
+    case 'addDocLink': need_(role, 'member'); return locked_(function () { return addDocLink_(req); });
+    case 'deleteDoc': need_(role, 'member'); return locked_(function () { return deleteDoc_(req); });
+    case 'docData': return docData_(req);
     default: throw new Error('알 수 없는 요청입니다: ' + req.action);
   }
 }
@@ -81,7 +89,10 @@ function getAll_() {
   var profs = readRows_(sheet_('professors', PROF_COLS), PROF_COLS)
     .filter(function (r) { return !truthy_(r.deleted); })
     .map(profOut_);
-  return { config: readConfig_(), profs: profs, entries: entries, serverTime: now_() };
+  var docs = readRows_(sheet_('docs', DOC_COLS), DOC_COLS)
+    .filter(function (r) { return !truthy_(r.deleted); })
+    .map(function (r) { delete r.deleted; delete r.fileId; return r; });
+  return { config: readConfig_(), profs: profs, entries: entries, docs: docs, serverTime: now_() };
 }
 
 function history_(req) {
@@ -154,6 +165,87 @@ function confirmEntry_(req) {
   return { entry: found.obj };
 }
 
+/* ---------- 인계장 파일 ---------- */
+
+function uploadDoc_(req) {
+  var d = req.doc || {};
+  checkBoard_(d.board);
+  if (!d.data) throw new Error('파일이 비어 있습니다.');
+  var bytes = Utilities.base64Decode(String(d.data));
+  if (bytes.length > MAX_FILE) throw new Error('파일은 25MB 이하만 올릴 수 있습니다.');
+  var name = String(d.name || 'file').slice(0, 200);
+  var blob = Utilities.newBlob(bytes, String(d.mime || 'application/octet-stream'), name);
+  var file = folder_().createFile(blob);
+  var url = '';
+  try {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    url = 'https://drive.google.com/file/d/' + file.getId() + '/view';
+  } catch (e) { url = ''; }
+  return locked_(function () {
+    var row = docRow_(d, req.by, { kind: 'file', fileId: file.getId(), url: url, name: name, mime: blob.getContentType(), size: String(bytes.length) });
+    appendRow_(sheet_('docs', DOC_COLS), DOC_COLS, row);
+    delete row.deleted; delete row.fileId;
+    return { doc: row };
+  });
+}
+
+function addDocLink_(req) {
+  var d = req.doc || {};
+  checkBoard_(d.board);
+  var url = String(d.url || '').trim();
+  if (!/^https?:\/\//.test(url)) throw new Error('http 로 시작하는 주소를 입력하세요.');
+  var row = docRow_(d, req.by, { kind: 'link', fileId: '', url: url, name: '', mime: '', size: '' });
+  appendRow_(sheet_('docs', DOC_COLS), DOC_COLS, row);
+  delete row.deleted; delete row.fileId;
+  return { doc: row };
+}
+
+function docRow_(d, by, extra) {
+  var title = String(d.title || extra.name || '인계장').trim().slice(0, 100);
+  var row = {
+    id: newId_(), board: String(d.board), slot: String(d.slot || newId_()), title: title,
+    note: String(d.note || '').slice(0, 200), by: String(by || ''), at: now_(), deleted: ''
+  };
+  for (var k in extra) row[k] = extra[k];
+  return row;
+}
+
+function deleteDoc_(req) {
+  var sh = sheet_('docs', DOC_COLS);
+  var found = findRow_(sh, DOC_COLS, req.id);
+  if (!found) throw new Error('없는 파일입니다.');
+  found.obj.deleted = 'TRUE';
+  writeRow_(sh, DOC_COLS, found.rowIndex, found.obj);
+  if (found.obj.fileId) {
+    try { DriveApp.getFileById(found.obj.fileId).setTrashed(true); } catch (e) { /* 이미 없음 */ }
+  }
+  return { id: req.id };
+}
+
+function docData_(req) {
+  var found = findRow_(sheet_('docs', DOC_COLS), DOC_COLS, req.id);
+  if (!found || truthy_(found.obj.deleted) || !found.obj.fileId) throw new Error('파일을 찾을 수 없습니다.');
+  var blob = DriveApp.getFileById(found.obj.fileId).getBlob();
+  return { name: found.obj.name, mime: found.obj.mime, data: Utilities.base64Encode(blob.getBytes()) };
+}
+
+function folder_() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty('FOLDER_ID');
+  if (id) {
+    try { return DriveApp.getFolderById(id); } catch (e) { /* 폴더가 지워졌으면 새로 만든다 */ }
+  }
+  var f = DriveApp.createFolder(FOLDER_NAME);
+  props.setProperty('FOLDER_ID', f.getId());
+  return f;
+}
+
+function checkBoard_(id) {
+  if (!readConfig_().boards.some(function (b) { return b.id === id; })) throw new Error('없는 보드입니다.');
+}
+
+function newId_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 12); }
+
 /* ---------- 구조(관리자) ---------- */
 
 function saveConfig_(req) {
@@ -164,6 +256,9 @@ function saveConfig_(req) {
   }
   c.boards.forEach(function (b) {
     if (!b.id || !b.name || !Array.isArray(b.sections)) throw new Error('보드 형식이 올바르지 않습니다.');
+  });
+  c.links = (Array.isArray(c.links) ? c.links : []).filter(function (l) {
+    return l && l.title && /^https?:\/\//.test(String(l.url || ''));
   });
   var json = JSON.stringify(c);
   if (json.length > 45000) throw new Error('설정이 너무 큽니다.');
@@ -220,6 +315,8 @@ function setup() {
   sheet_('entries', ENTRY_COLS);
   sheet_('professors', PROF_COLS);
   sheet_('history', HIST_COLS);
+  sheet_('docs', DOC_COLS);
+  folder_();
   var cs = sheet_('config', ['config']);
   if (!cs.getRange(2, 1).getValue()) cs.getRange(2, 1).setValue(JSON.stringify(defaultConfig_()));
   var props = PropertiesService.getScriptProperties();
@@ -263,7 +360,8 @@ function defaultConfig_() {
       { id: 'tips', name: '꿀팁', group: '공통', sections: [sec_('당직·생활'), sec_('EMR·전산'), sec_('장비·약품'), sec_('기타')] },
       { id: 'study', name: '공부', group: '공통', sections: [sec_('기도'), sec_('약리'), sec_('생리·모니터링'), sec_('소아'), sec_('부위마취'), sec_('기타')] }
     ],
-    profSections: [sec_('선호 약물'), sec_('라인·모니터링'), sec_('유도·유지'), sec_('싫어하시는 것'), sec_('기타')]
+    profSections: [sec_('스타일'), sec_('세팅·준비'), sec_('선호 약물'), sec_('라인·모니터링'), sec_('유도·유지'), sec_('싫어하시는 것'), sec_('기타')],
+    links: []
   };
 }
 
@@ -302,7 +400,9 @@ function hash_(pw) {
 
 function readConfig_() {
   var v = sheet_('config', ['config']).getRange(2, 1).getValue();
-  return v ? JSON.parse(v) : defaultConfig_();
+  var c = v ? JSON.parse(v) : defaultConfig_();
+  if (!Array.isArray(c.links)) c.links = [];
+  return c;
 }
 
 function validateTarget_(cfg, scope, target) {
