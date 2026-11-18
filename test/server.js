@@ -79,13 +79,17 @@ const ctx = {
     const store = {};
     return {
       Files: {
-        create: (meta, blob) => { const id = 'g' + crypto.randomUUID().slice(0, 8); store[id] = { meta, blob, trashed: false }; return { id }; },
+        create: (meta, blob) => { const id = 'g' + crypto.randomUUID().replace(/-/g, '').slice(0, 24); store[id] = { meta, blob, trashed: false }; return { id }; },
         get: (id, opt) => { if (!store[id]) throw new Error('404'); return opt && opt.alt === 'media' ? store[id].blob.getBytes() : { id, trashed: store[id].trashed }; },
-        update: (meta, id) => { if (!store[id]) throw new Error('404'); Object.assign(store[id], meta); return { id }; }
+        update: (meta, id) => { if (!store[id]) throw new Error('404'); Object.assign(store[id], meta); return { id }; },
+        export: (id) => 'OCR 테스트 텍스트 Mallampati class III ' + (store[id] && store[id].meta.name),
+        remove: (id) => { delete store[id]; }
       },
       Permissions: { create: () => ({}) }
     };
   })(),
+  ScriptApp: { getOAuthToken: () => 'x' },
+  UrlFetchApp: { fetch: () => ({ getResponseCode: () => 500, getContentText: () => '' }) },
   ContentService: { MimeType: { JSON: 'json' }, createTextOutput: s => ({ s, setMimeType() { return this; } }) },
   console, Logger: { log: m => console.log("[Logger]", m) }
 };

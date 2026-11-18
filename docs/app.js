@@ -4,7 +4,6 @@
 
   var API_URL = (window.HB_CONFIG && window.HB_CONFIG.API_URL) || '';
   var LS = 'hb.';
-  var STALE_DAYS = 365;
 
   // 주사기 라벨(ISO 26825) 계열 색
   var PALETTE = [
@@ -25,6 +24,15 @@
   var PAL = { anon: '#D5DBD9' };
   PALETTE.forEach(function (p) { PAL[p.id] = p.hex; });
 
+  var CK = (function () {
+    var k = null;
+    try { k = localStorage.getItem('hb.ck'); } catch (e) { k = null; }
+    if (!k) {
+      k = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+      try { localStorage.setItem('hb.ck', k); } catch (e) { /* 저장 불가 */ }
+    }
+    return k;
+  })();
   var S = {
     pw: ls('pw'), role: ls('role'), me: ls('me'),
     data: null, idx: null, lastFetch: 0, busy: false,
@@ -45,7 +53,7 @@
   /* ---------- API ---------- */
   function api(action, payload) {
     if (!API_URL) return Promise.reject(new Error('config.js 에 API 주소가 아직 없습니다.'));
-    var body = Object.assign({ action: action, pw: S.pw, by: S.me || '' }, payload || {});
+    var body = Object.assign({ action: action, pw: S.pw, by: S.me || '', ck: CK }, payload || {});
     setBusy(true);
     return fetch(API_URL, { method: 'POST', body: JSON.stringify(body), redirect: 'follow' })
       .then(function (r) { return r.json(); })
@@ -135,6 +143,11 @@
   }
   function canWrite() { return S.role === 'member' || S.role === 'admin'; }
   function isAdmin() { return S.role === 'admin'; }
+  function canModify(e) { return canWrite() && (isAdmin() || e.mine || (S.me && S.me !== 'anon' && e.authorId === S.me)); }
+  function isStudyBoard(b) { return !!b && (b.type === 'study' || b.id === 'study'); }
+  function studyBoards() { return S.data.config.boards.filter(isStudyBoard); }
+  function findEntry(id) { return S.data.entries.filter(function (x) { return x.id === id; })[0]; }
+  function cbadge(n) { return n ? '<span class="cbadge" aria-label="댓글 ' + n + '개">' + (n > 99 ? '99+' : n) + '</span>' : ''; }
 
   function ago(iso) {
     if (!iso) return '';
@@ -147,10 +160,7 @@
     var y = String(dt.getFullYear()).slice(2);
     return y + '.' + (dt.getMonth() + 1) + '.' + dt.getDate();
   }
-  function isStale(e) {
-    var t = new Date(e.confirmedAt || e.updatedAt || e.createdAt).getTime();
-    return Date.now() - t > STALE_DAYS * 86400000;
-  }
+
 
   // **굵게**, "- " 목록, 링크, 검색 강조
   function fmt(text, q) {
@@ -231,7 +241,7 @@
     var r = parseRoute();
     var body;
     switch (r.name) {
-      case 'b': body = S.idx.boards[r.id] ? (r.sub === 'prof' ? viewBoardProfs(r.id) : viewBoard(r.id)) : viewMissing(); break;
+      case 'b': body = S.idx.boards[r.id] ? (isStudyBoard(S.idx.boards[r.id]) ? viewStudy(r.id) : r.sub === 'prof' ? viewBoardProfs(r.id) : viewBoard(r.id)) : viewMissing(); break;
       case 'p': body = S.idx.profs[r.id] ? viewProf(r.id) : viewMissing(); break;
       case 'profs': body = viewProfs(); break;
       case 'search': body = viewSearch(); break;
@@ -240,7 +250,7 @@
     }
     app.innerHTML =
       '<div class="shell">' + topbar(r) +
-      '<div class="layout">' + sidebar(r) + '<main class="main' + (r.name === 'home' ? ' main-wide' : '') + '" id="main">' + body + '</main></div>' +
+      '<div class="layout">' + sidebar(r) + '<main class="main' + (r.name === 'home' || (r.name === 'b' && S.idx.boards[r.id] && isStudyBoard(S.idx.boards[r.id])) ? ' main-wide' : '') + '" id="main">' + body + '</main></div>' +
       fab(r) + '</div>';
     if (r.name === 'b' && r.sub === 's' && r.third && S.scrollSec) {
       S.scrollSec = false;
@@ -250,6 +260,8 @@
     if (S.focusEntry) {
       var fid = S.focusEntry; S.focusEntry = null;
       var fe = document.getElementById('e-' + fid);
+      var fentry = findEntry(fid);
+      if (fentry && fentry.scope === 'board' && isStudyBoard(S.idx.boards[fentry.target])) { setTimeout(function () { openEntry(fid); }, 0); fe = null; }
       if (fe) {
         var sec = fe.closest('.section');
         if (sec) sec.classList.remove('collapsed');
@@ -286,6 +298,7 @@
   function navItems() {
     var groups = [], gmap = {};
     S.data.config.boards.forEach(function (b) {
+      if (isStudyBoard(b)) return;
       var g = b.group || '기타';
       if (!gmap[g]) { gmap[g] = { name: g, boards: [] }; groups.push(gmap[g]); }
       gmap[g].boards.push(b);
@@ -300,6 +313,9 @@
   function strip(r) {
     var out = '<nav class="strip" aria-label="보드">';
     out += '<a class="chip-nav" href="#/"' + (isCurrent(r, 'home') ? ' aria-current="page"' : '') + '>홈</a>';
+    studyBoards().forEach(function (b) {
+      out += '<a class="chip-nav chip-study" href="#/b/' + b.id + '"' + (isCurrent(r, 'b', b.id) ? ' aria-current="page"' : '') + '>' + esc(b.name) + '</a>';
+    });
     navItems().forEach(function (g) {
       out += '<span class="strip-sep"></span>';
       g.boards.forEach(function (b) {
@@ -312,6 +328,9 @@
   function sidebar(r) {
     var out = '<aside class="sidebar"><div class="side-group">' +
       '<a class="side-link" href="#/"' + (isCurrent(r, 'home') ? ' aria-current="page"' : '') + '>홈</a>' +
+      studyBoards().map(function (b) {
+        return '<a class="side-link side-study" href="#/b/' + b.id + '"' + (isCurrent(r, 'b', b.id) ? ' aria-current="page"' : '') + '>' + esc(b.name) + '<small>' + (S.idx.counts['board|' + b.id] || '') + '</small></a>';
+      }).join('') +
       '<a class="side-link" href="#/profs"' + (isCurrent(r, 'profs') ? ' aria-current="page"' : '') + '>교수님 <small>' + S.data.profs.length + '</small></a></div>';
     navItems().forEach(function (g) {
       out += '<div class="side-group"><h4>' + esc(g.name) + '</h4>';
@@ -325,6 +344,7 @@
   }
   function fab(r) {
     if (!canWrite()) return '';
+    if (r.name === 'b' && S.idx.boards[r.id] && isStudyBoard(S.idx.boards[r.id])) return '<button class="fab" data-act="study-new" data-board="' + esc(r.id) + '">' + ICON.plus + '공부 노트</button>';
     if (r.name === 'b' && r.sub !== 'prof' && S.idx.boards[r.id]) return '<button class="fab" data-act="compose" data-scope="board" data-target="' + esc(r.id) + '">' + ICON.plus + '인계 추가</button>';
     if (r.name === 'p' && S.idx.profs[r.id]) return '<button class="fab" data-act="compose" data-scope="prof" data-target="' + esc(r.id) + '">' + ICON.plus + '인계 추가</button>';
     return '';
@@ -363,7 +383,7 @@
   function msg(e, opts) {
     opts = opts || {};
     var c = colorOf(e.authorId);
-    var stale = isStale(e);
+    var stale = false;
     var edited = e.updatedAt && e.updatedAt !== e.createdAt;
     var crumb = opts.crumb ? '<a class="msg-crumb" href="' + crumbHref(e) + '">' + esc(crumbText(e)) + '</a>' : '';
     if (opts.prof && S.idx.profs[e.target]) crumb = '<a class="prof-label" href="#/p/' + esc(e.target) + '">' + esc(S.idx.profs[e.target].name) + ' 교수님</a>';
@@ -373,13 +393,17 @@
       '<span class="name-label" style="background:' + c + '">' + esc(nameOf(e.authorId)) + '</span>' +
       '<span class="msg-time" title="' + esc(e.createdAt) + '">' + ago(e.createdAt) + '</span>' +
       (edited ? '<span class="edited">· ' + esc(nameOf(e.updatedBy)) + ' 수정</span>' : '') +
-      (stale ? '<span class="stale-note">1년 넘게 확인 안 됨</span>' : '') + crumb +
-      '</div><button class="bubble" style="--c:' + c + '" data-act="entry" data-id="' + esc(e.id) + '">' + fmt(e.text, opts.q) + '</button></div></div>';
+      crumb +
+      '</div><button class="bubble" style="--c:' + c + '" data-act="entry" data-id="' + esc(e.id) + '">' +
+      (e.title ? '<b class="bubble-title">' + esc(e.title) + '</b>' : '') + fmt(e.text, opts.q) +
+      ((e.images || []).length ? '<span class="bubble-imgs">' + e.images.slice(0, 4).map(function (im) { return imgTag(im.id, 'w300', ''); }).join('') + '</span>' : '') +
+      cbadge(e.comments) + '</button></div></div>';
   }
   function crumbText(e) {
     if (e.scope === 'board') {
       var b = S.idx.boards[e.target];
       var s = b && b.sections.filter(function (x) { return x.id === e.section; })[0];
+      if (isStudyBoard(b)) return (b.name) + (s ? ' › ' + s.name : '') + (e.title ? ' › ' + e.title : '');
       return (b ? b.name : '?') + (s ? ' › ' + s.name : '') + (e.tag ? ' › ' + e.tag : '');
     }
     var p = S.idx.profs[e.target];
@@ -432,7 +456,13 @@
         : '<div class="empty-line">' + (isAdmin() ? '관리자 설정 → 링크에서 추가하세요.' : '아직 등록된 링크가 없어요.') + '</div>') + '</section>';
 
     var groups = '<section class="home-block"><div class="block-head"><h2>전체 보드</h2></div><div class="ov-grid">' +
-      cfg.boards.map(overviewCard).join('') + '</div></section>';
+      cfg.boards.filter(function (b) { return !isStudyBoard(b); }).map(overviewCard).join('') + '</div></section>';
+    var studyHtml = studyBoards().map(function (b) {
+      var list = (S.idx.byTarget['board|' + b.id] || []).slice().sort(function (a, c) { return a.updatedAt < c.updatedAt ? 1 : -1; });
+      return '<section class="home-block home-study"><div class="block-head"><h2>' + esc(b.name) + ' 노트</h2><a class="add-link" href="#/b/' + b.id + '">전체 ' + list.length + '개 보기</a></div>' +
+        (list.length ? '<div class="study-strip">' + list.slice(0, 8).map(function (e) { return studyCard(e, { compact: true }); }).join('') + '</div>'
+          : '<div class="empty-line">교수님께 들은 설명이나 공부한 내용을 사진과 함께 남겨보세요.</div>') + '</section>';
+    }).join('');
 
     var recent = S.data.entries.slice().sort(function (a, b) { return a.updatedAt < b.updatedAt ? 1 : -1; }).slice(0, 8);
     var recentHtml = recent.length ? '<section class="home-block"><div class="block-head"><h2>최근 업데이트</h2><a class="add-link" href="#/search">전체 검색</a></div><div class="list">' +
@@ -445,7 +475,7 @@
     var who = S.role === 'viewer' ? '' : nameOf(S.me) + ', ';
     return '<div class="page-head"><div class="eyebrow">' + esc(who) + '안녕하세요</div><h1>' + esc(cfg.title || '인계보드') + '</h1>' +
       '<p>인계 ' + S.data.entries.length + '개 · 교수님 ' + S.data.profs.length + '분 · 인계장 파일 ' + countSlots() + '개</p></div>' +
-      linkHtml + groups + recentHtml;
+      linkHtml + studyHtml + groups + recentHtml;
   }
   function countSlots() {
     var n = 0;
@@ -610,8 +640,8 @@
 
   /* ---------- 시트 ---------- */
   var sheet = document.getElementById('sheet');
-  function openSheet(html) {
-    sheet.innerHTML = '<div class="sheet-panel" role="dialog" aria-modal="true"><div class="grabber"></div>' + html + '</div>';
+  function openSheet(html, cls) {
+    sheet.innerHTML = '<div class="sheet-panel' + (cls ? ' ' + cls : '') + '" role="dialog" aria-modal="true"><div class="grabber"></div>' + html + '</div>';
     sheet.hidden = false;
     document.body.style.overflow = 'hidden';
     var f = sheet.querySelector('[autofocus]');
@@ -621,7 +651,7 @@
     sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = '';
   }
   sheet.addEventListener('click', function (ev) { if (ev.target === sheet) closeSheet(); });
-  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && !sheet.hidden) closeSheet(); });
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && !sheet.hidden && !LB.open && !PALETTE_UI.open) closeSheet(); });
 
   function sectionsFor(scope, target) {
     return scope === 'board' ? S.idx.boards[target].sections : S.data.config.profSections;
@@ -648,21 +678,72 @@
   }
 
   function openEntry(id) {
-    var e = S.data.entries.filter(function (x) { return x.id === id; })[0];
+    var e = findEntry(id);
     if (!e) return;
-    var meta = nameOf(e.authorId) + ' · ' + new Date(e.createdAt).toLocaleDateString('ko-KR') +
-      (e.confirmedAt ? ' · 마지막 확인 ' + ago(e.confirmedAt) + (e.confirmedBy ? ' (' + nameOf(e.confirmedBy) + ')' : '') : '');
-    openSheet('<h2 class="sheet-title">' + esc(crumbText(e)) + '</h2>' +
-      '<div class="preview">' + esc(e.text.slice(0, 200)) + '</div>' +
-      '<p class="muted" style="margin:-6px 0 14px;font-size:13px">' + esc(meta) + '</p>' +
-      '<div class="action-list">' +
-      (canWrite() ? '<button class="btn" data-act="edit" data-id="' + esc(id) + '">수정</button>' +
-        '<button class="btn" data-act="confirm" data-id="' + esc(id) + '">아직 유효해요 (확인 날짜 갱신)</button>' : '') +
-      '<button class="btn" data-act="history" data-id="' + esc(id) + '">수정 이력 보기</button>' +
-      '<button class="btn" data-act="copy" data-id="' + esc(id) + '">내용 복사</button>' +
-      (canWrite() ? '<button class="btn btn-danger" data-act="delete" data-id="' + esc(id) + '">삭제</button>' : '') +
-      '<button class="btn" data-act="close">닫기</button></div>');
+    var study = e.scope === 'board' && isStudyBoard(S.idx.boards[e.target]);
+    var c = colorOf(e.authorId);
+    var edited = e.updatedAt && e.updatedAt !== e.createdAt;
+    var tools = '<div class="ed-tools">' +
+      (canModify(e) ? '<button class="tool" data-act="edit" data-id="' + esc(id) + '">수정</button>' : '') +
+      '<button class="tool" data-act="copy" data-id="' + esc(id) + '">복사</button>' +
+      '<button class="tool" data-act="history" data-id="' + esc(id) + '">이력</button>' +
+      (canModify(e) ? '<button class="tool tool-danger" data-act="delete" data-id="' + esc(id) + '">삭제</button>' : '') +
+      '<button class="tool tool-close" data-act="close" aria-label="닫기">✕</button></div>';
+    var imgs = (e.images || []).length ? '<div class="ed-imgs' + (e.images.length === 1 ? ' one' : '') + '">' + e.images.map(function (im, i) {
+      return '<button class="ed-img" data-act="lightbox" data-id="' + esc(id) + '" data-i="' + i + '">' + imgTag(im.id, 'w1000', '') + '</button>';
+    }).join('') + '</div>' : '';
+    var tags = study && e.tags ? '<div class="ed-tags">' + e.tags.split(',').map(function (t) { return '<span class="kw">#' + esc(t) + '</span>'; }).join('') + '</div>' : '';
+    openSheet('<div class="ed">' + tools +
+      '<div class="ed-crumb">' + esc(crumbText(e).replace(e.title ? ' › ' + e.title : '', '')) + (study && e.source ? ' · ' + esc(e.source) : '') + '</div>' +
+      (e.title ? '<h2 class="ed-title">' + esc(e.title) + '</h2>' : '') +
+      '<div class="ed-meta"><span class="avatar" style="background:' + c + '">' + esc(initialOf(e.authorId)) + '</span><b>' + esc(nameOf(e.authorId)) + '</b>' +
+      '<span>' + new Date(e.createdAt).toLocaleDateString('ko-KR') + (edited ? ' · ' + esc(nameOf(e.updatedBy)) + ' 수정' : '') + '</span></div>' +
+      tags + (e.text ? '<div class="ed-body">' + fmt(e.text) + '</div>' : '') + imgs +
+      '<section class="ed-comments"><h3>댓글 <span class="count" id="cm-count">' + (e.comments || 0) + '</span></h3>' +
+      '<div id="cm-list" class="cm-list">' + (e.comments ? '<div class="loading">불러오는 중…</div>' : '<div class="cm-empty">아직 댓글이 없어요.</div>') + '</div></section>' +
+      (canWrite() ? '<form class="cm-form" id="cm-form" data-id="' + esc(id) + '"><textarea name="text" rows="1" maxlength="2000" placeholder="댓글 달기"></textarea><button class="btn btn-primary btn-sm" type="submit">등록</button></form>' : '') +
+      '</div>', 'sheet-wide');
+    if (e.comments) loadComments(id);
   }
+
+  function loadComments(id) {
+    api('comments', { id: id }).then(function (j) {
+      var list = document.getElementById('cm-list');
+      if (!list) return;
+      var e = findEntry(id);
+      if (e && e.comments !== j.comments.length) { e.comments = j.comments.length; afterLocalChange(true); }
+      renderComments(id, j.comments);
+    }).catch(function (err) { toast(err.message); });
+  }
+  function renderComments(id, list) {
+    var el = document.getElementById('cm-list');
+    if (!el) return;
+    el._data = list;
+    document.getElementById('cm-count').textContent = list.length;
+    el.innerHTML = list.length ? list.map(function (c) {
+      var mine = canWrite() && (isAdmin() || c.mine || (S.me && S.me !== 'anon' && c.authorId === S.me));
+      return '<div class="cm"><span class="avatar" style="background:' + colorOf(c.authorId) + '">' + esc(initialOf(c.authorId)) + '</span>' +
+        '<div class="cm-main"><div class="cm-meta"><b>' + esc(nameOf(c.authorId)) + '</b><span>' + ago(c.createdAt) + '</span>' +
+        (mine ? '<button class="cm-del" data-act="cm-del" data-id="' + esc(c.id) + '" data-entry="' + esc(id) + '" aria-label="댓글 삭제">삭제</button>' : '') + '</div>' +
+        '<div class="cm-text">' + fmt(c.text) + '</div></div></div>';
+    }).join('') : '<div class="cm-empty">아직 댓글이 없어요.</div>';
+  }
+  function submitComment(f) {
+    var ta = f.querySelector('textarea'), text = ta.value.trim();
+    if (!text) return;
+    var id = f.getAttribute('data-id'), btn = f.querySelector('button');
+    btn.disabled = true;
+    api('addComment', { id: id, text: text }).then(function (j) {
+      btn.disabled = false; ta.value = ''; ta.style.height = '';
+      var el = document.getElementById('cm-list');
+      var list = (el && el._data) || [];
+      list.push(j.comment);
+      renderComments(id, list);
+      var e = findEntry(id); if (e) { e.comments = list.length; afterLocalChange(true); }
+      el.lastElementChild && el.lastElementChild.scrollIntoView({ block: 'nearest' });
+    }).catch(function (err) { btn.disabled = false; toast(err.message); });
+  }
+
 
   function openMenu() {
     openSheet('<h2 class="sheet-title">' + (S.role === 'viewer' ? '보기 전용으로 접속 중' : esc(nameOf(S.me)) + '님') + '</h2>' +
@@ -836,7 +917,7 @@
   function viewAdmin() {
     if (!S.draft) S.draft = clone(S.data.config);
     var d = S.draft, tab = S.adminTab;
-    var tabs = [['basic', '기본'], ['links', '링크'], ['members', '동기'], ['boards', '보드'], ['profsec', '교수님 섹션'], ['profs', '교수님 명단'], ['pw', '비밀번호']];
+    var tabs = [['basic', '기본'], ['study', '공부'], ['links', '링크'], ['members', '동기'], ['boards', '보드'], ['profsec', '교수님 섹션'], ['profs', '교수님 명단'], ['pw', '비밀번호']];
     var out = '<div class="page-head"><h1>관리자 설정</h1><p>구조 변경은 아래 "설정 저장"을 눌러야 모두에게 반영됩니다.</p></div>' +
       '<div class="admin-tabs">' + tabs.map(function (t) {
         return '<button class="chip-nav" data-act="admin-tab" data-tab="' + t[0] + '"' + (tab === t[0] ? ' aria-current="page"' : '') + '>' + t[1] + '</button>';
@@ -844,6 +925,12 @@
 
     if (tab === 'basic') {
       out += '<div class="admin-card"><label class="field"><span>보드 이름</span><input class="input" data-bind="title" value="' + esc(d.title || '') + '"></label></div>';
+    } else if (tab === 'study') {
+      var sb = studyBoards()[0];
+      out += '<div class="admin-card"><h3>키워드 버튼</h3><textarea class="textarea" style="min-height:90px" data-bind-list="studyTags">' + esc((d.studyTags || []).join(', ')) + '</textarea>' +
+        '<div class="hint">쉼표로 구분합니다. 공부 보드 상단 버튼과 글쓰기 화면에 이 순서대로 나옵니다. 동기들이 새로 만든 키워드도 자동으로 뒤에 붙습니다.</div></div>' +
+        '<div class="admin-card"><h3>출처 종류</h3><textarea class="textarea" style="min-height:60px" data-bind-list="studySources">' + esc((d.studySources || []).join(', ')) + '</textarea></div>' +
+        '<div class="admin-card"><h3>카테고리</h3><p class="hint" style="margin-top:0">카테고리는 "보드" 탭의 ' + esc(sb ? sb.name : '공부') + ' 보드 섹션입니다. 거기서 이름·순서를 바꾸면 됩니다.</p></div>';
     } else if (tab === 'links') {
       if (!d.links) d.links = [];
       out += '<div class="admin-card"><h3>홈 링크</h3>' + d.links.map(function (l, i) {
@@ -951,6 +1038,38 @@
     switch (act) {
       case 'close': closeSheet(); break;
       case 'palette': openPalette(); break;
+      case 'study-new': openStudyComposer(el.getAttribute('data-board')); break;
+      case 'study-card': openEntry(id); break;
+      case 'lightbox': openLightbox(id, +el.getAttribute('data-i')); break;
+      case 'cm-del':
+        if (!confirm('댓글을 삭제할까요?')) return;
+        var entryId = el.getAttribute('data-entry');
+        api('deleteComment', { id: id }).then(function () {
+          var cl = document.getElementById('cm-list');
+          var list = ((cl && cl._data) || []).filter(function (c) { return c.id !== id; });
+          renderComments(entryId, list);
+          var ce = findEntry(entryId); if (ce) { ce.comments = list.length; afterLocalChange(true); }
+        }).catch(function (err) { toast(err.message); });
+        break;
+      case 'st-view': S.st.view = el.getAttribute('data-v'); saveSt(); rerenderKeep(); break;
+      case 'st-cat': S.st.cat = el.getAttribute('data-v'); saveSt(); rerenderKeep(); break;
+      case 'st-tag':
+        var tg = el.getAttribute('data-v'), ti = S.st.tags.indexOf(tg);
+        if (ti >= 0) S.st.tags.splice(ti, 1); else S.st.tags.push(tg);
+        saveSt(); rerenderKeep(); break;
+      case 'st-clear': S.st.tags = []; S.st.cat = ''; S.st.src = ''; S.st.author = ''; S.st.photo = false; S.st.q = ''; saveSt(); rerenderKeep(); break;
+      case 'st-photo': S.st.photo = !S.st.photo; saveSt(); rerenderKeep(); break;
+      case 'cmp-tag':
+        el.setAttribute('aria-pressed', el.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'); break;
+      case 'cmp-src':
+        el.closest('.src-row').querySelectorAll('[data-act=cmp-src]').forEach(function (b) { b.setAttribute('aria-pressed', b === el ? 'true' : 'false'); }); break;
+      case 'cmp-img-del': CMP.images.splice(+el.getAttribute('data-i'), 1); renderCmpImages(); break;
+      case 'cmp-img-left':
+        var ii = +el.getAttribute('data-i'); if (ii > 0) { var tt = CMP.images[ii]; CMP.images[ii] = CMP.images[ii - 1]; CMP.images[ii - 1] = tt; renderCmpImages(); } break;
+      case 'lb-close': closeLightbox(); break;
+      case 'lb-prev': moveLightbox(-1); break;
+      case 'lb-next': moveLightbox(1); break;
+      case 'lb-ocr': var lo = document.querySelector('.lb-ocr'); if (lo) lo.hidden = !lo.hidden; break;
       case 'menu': openMenu(); break;
       case 'pick-me':
         S.me = id; ls('me', id); render(); break;
@@ -969,13 +1088,10 @@
         openComposer(el.getAttribute('data-scope'), el.getAttribute('data-target'), el.getAttribute('data-section')); break;
       case 'entry': openEntry(id); break;
       case 'edit':
-        var e = S.data.entries.filter(function (x) { return x.id === id; })[0];
-        if (e) openComposer(e.scope, e.target, e.section, e);
-        break;
-      case 'confirm':
-        el.disabled = true;
-        api('confirmEntry', { id: id }).then(function (j) { upsertEntry(j.entry); closeSheet(); toast('확인 날짜를 갱신했어요.'); })
-          .catch(function (err) { el.disabled = false; toast(err.message); });
+        var e = findEntry(id);
+        if (!e) break;
+        if (e.scope === 'board' && isStudyBoard(S.idx.boards[e.target])) openStudyComposer(e.target, e);
+        else openComposer(e.scope, e.target, e.section, e);
         break;
       case 'history': openHistory(id); break;
       case 'copy':
@@ -983,7 +1099,7 @@
         if (ce && navigator.clipboard) navigator.clipboard.writeText(ce.text).then(function () { toast('복사했어요.'); closeSheet(); });
         break;
       case 'delete':
-        if (!confirm('이 인계를 삭제할까요? 수정 이력에는 남습니다.')) return;
+        if (!confirm('이 글을 삭제할까요? 댓글도 함께 보이지 않게 됩니다.')) return;
         el.disabled = true;
         api('deleteEntry', { id: id }).then(function () {
           S.data.entries = S.data.entries.filter(function (x) { return x.id !== id; });
@@ -1045,6 +1161,7 @@
         if (added.length) markDirty();
         rerenderAdmin(); toast(added.length + '개를 추가했어요. "설정 저장"을 눌러야 반영됩니다.'); break;
       case 'goto-links': S.adminTab = 'links'; break;
+      case 'goto-study-admin': S.adminTab = 'study'; break;
       case 'doc-upload': openDocUpload(el.getAttribute('data-board')); break;
       case 'doc-replace': openDocUpload(el.getAttribute('data-board'), el.getAttribute('data-slot')); break;
       case 'doc-more': openDocMore(el.getAttribute('data-board'), el.getAttribute('data-slot')); break;
@@ -1074,6 +1191,7 @@
     if (t.id === 'q') { S.q = t.value; var pos = t.selectionStart; render(); var n = document.getElementById('q'); if (n) n.setSelectionRange(pos, pos); return; }
     if (t.id === 'profq') { S.profQ = t.value; var p2 = t.selectionStart; render(); var n2 = document.getElementById('profq'); n2.focus(); n2.setSelectionRange(p2, p2); return; }
     if (t.matches('[data-bind]') && t.type !== 'checkbox' && t.tagName !== 'SELECT') setDraft(t.getAttribute('data-bind'), t.value);
+    if (t.matches('[data-bind-list]')) setDraft(t.getAttribute('data-bind-list'), t.value.split(',').map(function (x) { return x.trim().replace(/^#/, ''); }).filter(Boolean));
   });
   document.addEventListener('change', function (ev) {
     var t = ev.target;
@@ -1088,7 +1206,13 @@
     var t = el.closest('[data-drop]') || el.closest('.docs-block[data-board]');
     if (t) return t;
     // 보드 화면이면 어디에 놓아도 그 보드의 인계장으로 올린다.
-    if (sheet.hidden) { var r = parseRoute(); if (r.name === 'b' && r.sub !== 'prof') return document.querySelector('.docs-block[data-board]'); }
+    var sf = el.closest('#study-form');
+    if (sf) return sf;
+    if (sheet.hidden) {
+      var r = parseRoute();
+      if (r.name === 'b' && S.idx.boards[r.id] && isStudyBoard(S.idx.boards[r.id])) return document.getElementById('study-root');
+      if (r.name === 'b' && r.sub !== 'prof') return document.querySelector('.docs-block[data-board]');
+    }
     return null;
   }
   function hasFiles(ev) { return ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], 'Files') >= 0; }
@@ -1114,6 +1238,8 @@
     t.classList.remove('drag-over');
     var file = ev.dataTransfer.files[0];
     if (!file) return;
+    if (t.id === 'study-form') return addStudyFiles(ev.dataTransfer.files);
+    if (t.id === 'study-root') { openStudyComposer(t.getAttribute('data-board')); return addStudyFiles(ev.dataTransfer.files); }
     if (t.hasAttribute('data-drop')) setDropFile(t.closest('form'), file);
     else openDocUpload(t.getAttribute('data-board'), null, file);
   });
@@ -1124,6 +1250,17 @@
   });
 
   document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && ev.target.closest && ev.target.closest('#cm-form')) {
+      ev.preventDefault(); return ev.target.closest('form').requestSubmit();
+    }
+    if (LB.open) {
+      if (ev.key === 'Escape') { ev.preventDefault(); return closeLightbox(); }
+      if (ev.key === 'ArrowLeft') return moveLightbox(-1);
+      if (ev.key === 'ArrowRight') return moveLightbox(1);
+    }
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && ev.target.closest('#study-form')) {
+      ev.preventDefault(); return ev.target.closest('form').requestSubmit();
+    }
     if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && ev.target.closest('#composer')) {
       ev.preventDefault();
       ev.target.closest('form').requestSubmit();
@@ -1137,6 +1274,8 @@
     if (f.id === 'composer') return submitComposer(f);
     if (f.id === 'prof-form') return submitProf(f);
     if (f.id === 'doc-form') return submitDoc(f);
+    if (f.id === 'study-form') return submitStudy(f);
+    if (f.id === 'cm-form') return submitComment(f);
     if (f.getAttribute('data-pwform')) return submitPw(f);
   });
 
@@ -1165,7 +1304,7 @@
     if (i >= 0) S.data.entries[i] = e; else S.data.entries.push(e);
     afterLocalChange();
   }
-  function afterLocalChange() {
+  function afterLocalChange(quiet) {
     ls('cache', JSON.stringify(S.data));
     buildIndex();
     var y = window.scrollY; render(); window.scrollTo(0, y);
@@ -1224,6 +1363,344 @@
       afterLocalChange(); toast('설정을 저장했어요.');
     }).catch(function (e) { btn.disabled = false; toast(e.message); });
   }
+
+  /* ---------- 공부 보드 ---------- */
+  var ST_DEFAULT = { view: 'gallery', cat: '', tags: [], src: '', author: '', photo: false, q: '', sort: 'new' };
+  S.st = (function () { try { return Object.assign({}, ST_DEFAULT, JSON.parse(ls('st') || '{}'), { q: '' }); } catch (e) { return Object.assign({}, ST_DEFAULT); } })();
+  if (!Array.isArray(S.st.tags)) S.st.tags = [];
+  function saveSt() { var c = Object.assign({}, S.st); delete c.q; ls('st', JSON.stringify(c)); }
+  function rerenderKeep() {
+    var y = window.scrollY, a = document.activeElement, aid = a && a.id, pos = a && a.selectionStart;
+    render(); window.scrollTo(0, y);
+    if (aid) { var n = document.getElementById(aid); if (n) { n.focus(); if (pos != null && n.setSelectionRange) n.setSelectionRange(pos, pos); } }
+  }
+  function tagsOf(e) { return e.tags ? String(e.tags).split(',').filter(String) : []; }
+  function searchText(e) {
+    return [e.title || '', e.text || '', e.tag || '', (e.tags || '').replace(/,/g, ' '), e.source || '', crumbText(e), nameOf(e.authorId), e.ocr || ''].join(' ');
+  }
+
+  // 사진: 드라이브 썸네일 주소를 쓰고, 막히면 서버를 거쳐 받아온다.
+  var IMG_CACHE = {};
+  function imgTag(id, size, alt) {
+    if (IMG_CACHE[id]) return '<img src="' + IMG_CACHE[id] + '" alt="' + esc(alt || '') + '" loading="lazy">';
+    return '<img src="https://drive.google.com/thumbnail?id=' + encodeURIComponent(id) + '&sz=' + size + '" data-img-id="' + esc(id) + '" alt="' + esc(alt || '') + '" loading="lazy" referrerpolicy="no-referrer">';
+  }
+  document.addEventListener('error', function (ev) {
+    var img = ev.target;
+    if (!img || img.tagName !== 'IMG' || !img.getAttribute('data-img-id') || img._fallback) return;
+    img._fallback = true;
+    var id = img.getAttribute('data-img-id');
+    if (IMG_CACHE[id]) { img.src = IMG_CACHE[id]; return; }
+    api('imageData', { id: id }).then(function (j) {
+      var bin = atob(j.data), arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      IMG_CACHE[id] = URL.createObjectURL(new Blob([arr]));
+      document.querySelectorAll('img[data-img-id="' + id + '"]').forEach(function (n) { n.src = IMG_CACHE[id]; });
+    }).catch(function () { img.classList.add('img-broken'); });
+  }, true);
+
+  function studyFilter(boardId) {
+    var st = S.st, b = S.idx.boards[boardId];
+    var terms = st.q.toLowerCase().split(/\s+/).filter(Boolean);
+    var list = (S.idx.byTarget['board|' + boardId] || []).filter(function (e) {
+      if (st.cat && e.section !== st.cat) return false;
+      if (st.src && e.source !== st.src) return false;
+      if (st.author && e.authorId !== st.author) return false;
+      if (st.photo && !(e.images || []).length) return false;
+      var tg = tagsOf(e);
+      if (st.tags.length && !st.tags.every(function (t) { return tg.indexOf(t) >= 0; })) return false;
+      if (terms.length && !matchAll(searchText(e), terms)) return false;
+      return true;
+    });
+    var by = st.sort;
+    list.sort(function (a, c) {
+      if (by === 'old') return a.createdAt < c.createdAt ? -1 : 1;
+      if (by === 'cmt') return (c.comments || 0) - (a.comments || 0) || (a.updatedAt < c.updatedAt ? 1 : -1);
+      if (by === 'title') return String(a.title || a.text).localeCompare(String(c.title || c.text), 'ko');
+      return a.updatedAt < c.updatedAt ? 1 : -1;
+    });
+    var known = {};
+    b.sections.forEach(function (x) { known[x.id] = 1; });
+    return { list: list, terms: terms, known: known };
+  }
+
+  function catColor(boardId, secId) {
+    var b = S.idx.boards[boardId], i = b ? b.sections.findIndex(function (x) { return x.id === secId; }) : -1;
+    var hues = ['#2E6F95', '#B5462F', '#5A7D2B', '#7A4E9C', '#A06A00', '#1F7A6E', '#9B3C67', '#4A5FA8', '#8A5A3A', '#3C7F4A', '#A0434A', '#55606E', '#6C6C3A'];
+    return i < 0 ? '#7A8583' : hues[i % hues.length];
+  }
+
+  function studyCard(e, opts) {
+    opts = opts || {};
+    var b = S.idx.boards[e.target];
+    var sec = b && b.sections.filter(function (x) { return x.id === e.section; })[0];
+    var im = (e.images || [])[0];
+    var terms = opts.terms || [];
+    var ocrHit = terms.length && e.ocr && !matchAll([e.title, e.text, e.tags].join(' '), terms) && matchAll(e.ocr, terms);
+    var body = snippet(e.text);
+    return '<button class="scard' + (opts.compact ? ' compact' : '') + (im ? ' has-img' : '') + '" data-act="study-card" data-id="' + esc(e.id) + '" style="--cat:' + catColor(e.target, e.section) + '">' +
+      (im ? '<span class="scard-img" style="aspect-ratio:' + (im.w && im.h ? Math.max(0.6, Math.min(1.8, im.w / im.h)).toFixed(3) : '4/3') + '">' + imgTag(im.id, 'w600', '') +
+        ((e.images || []).length > 1 ? '<span class="img-count">+' + (e.images.length - 1) + '</span>' : '') + '</span>' : '') +
+      '<span class="scard-body">' +
+      '<span class="scard-cat">' + esc(sec ? sec.name : '분류 없음') + (e.source ? '<i>' + esc(e.source) + '</i>' : '') + '</span>' +
+      (e.title ? '<b class="scard-title">' + hl(e.title, terms) + '</b>' : '') +
+      (body ? '<span class="scard-text">' + hl(body.slice(0, 220), terms) + '</span>' : '') +
+      (ocrHit ? '<span class="scard-ocr">📷 사진 속 글자: ' + hl(around(e.ocr, terms), terms) + '</span>' : '') +
+      (tagsOf(e).length ? '<span class="scard-tags">' + tagsOf(e).slice(0, 5).map(function (t) { return '<span class="kw' + (S.st.tags.indexOf(t) >= 0 ? ' on' : '') + '">#' + esc(t) + '</span>'; }).join('') + '</span>' : '') +
+      '<span class="scard-foot"><i class="dot" style="background:' + colorOf(e.authorId) + '"></i>' + esc(nameOf(e.authorId)) + '<span>' + ago(e.updatedAt) + '</span>' +
+      (e.comments ? '<span class="scard-cm">💬 ' + e.comments + '</span>' : '') + '</span></span>' + cbadge(e.comments) + '</button>';
+  }
+
+  function viewStudy(boardId) {
+    var b = S.idx.boards[boardId], st = S.st, cfg = S.data.config;
+    var all = S.idx.byTarget['board|' + boardId] || [];
+    var res = studyFilter(boardId), list = res.list;
+    // 키워드: 관리자가 정한 것 + 실제 쓰인 것(많이 쓰인 순)
+    var used = {};
+    all.forEach(function (e) { tagsOf(e).forEach(function (t) { used[t] = (used[t] || 0) + 1; }); });
+    var preset = cfg.studyTags || [];
+    var tags = preset.concat(Object.keys(used).filter(function (t) { return preset.indexOf(t) < 0; }).sort(function (a, c) { return used[c] - used[a]; }));
+    st.tags.forEach(function (t) { if (tags.indexOf(t) < 0) tags.push(t); });
+    var catCount = {};
+    all.forEach(function (e) { catCount[e.section] = (catCount[e.section] || 0) + 1; });
+    var authors = {};
+    all.forEach(function (e) { authors[e.authorId] = 1; });
+    var filtered = st.cat || st.tags.length || st.src || st.author || st.photo || st.q;
+
+    var head = '<div class="page-head study-head"><div><div class="eyebrow">함께 쌓는 공부 노트</div><h1>' + esc(b.name) + '</h1>' +
+      '<p>' + all.length + '개 · 사진 ' + all.reduce(function (n, e) { return n + (e.images || []).length; }, 0) + '장</p></div></div>';
+    var tools = '<div class="st-bar">' +
+      '<div class="searchbar st-search">' + ICON.search + '<input class="input" id="st-q" type="search" placeholder="제목, 내용, 키워드, 사진 속 글자까지 검색" value="' + esc(st.q) + '" autocomplete="off"></div>' +
+      '<nav class="seg st-views" aria-label="보기 방식">' + [['gallery', '갤러리'], ['board', '보드'], ['list', '목록']].map(function (v) {
+        return '<a href="javascript:void 0" data-act="st-view" data-v="' + v[0] + '"' + (st.view === v[0] ? ' aria-current="page"' : '') + '>' + v[1] + '</a>';
+      }).join('') + '</nav></div>';
+    var cats = '<div class="st-cats">' + '<button class="chip-nav' + (!st.cat ? ' on' : '') + '" data-act="st-cat" data-v="">전체 <small>' + all.length + '</small></button>' +
+      b.sections.map(function (x) {
+        return '<button class="chip-nav' + (st.cat === x.id ? ' on' : '') + '" data-act="st-cat" data-v="' + esc(x.id) + '" style="--cat:' + catColor(boardId, x.id) + '"><i class="cat-dot"></i>' + esc(x.name) + (catCount[x.id] ? ' <small>' + catCount[x.id] + '</small>' : '') + '</button>';
+      }).join('') + '</div>';
+    var kws = '<div class="st-kws">' + tags.map(function (t) {
+      return '<button class="kw-btn' + (st.tags.indexOf(t) >= 0 ? ' on' : '') + (used[t] ? '' : ' unused') + '" data-act="st-tag" data-v="' + esc(t) + '" aria-pressed="' + (st.tags.indexOf(t) >= 0) + '">#' + esc(t) + (used[t] ? '<small>' + used[t] + '</small>' : '') + '</button>';
+    }).join('') + (isAdmin() ? '<a class="kw-edit" href="#/admin" data-act="goto-study-admin">키워드 관리</a>' : '') + '</div>';
+    var filters = '<div class="st-filters">' +
+      '<select class="select sm" id="st-src" aria-label="출처"><option value="">출처 전체</option>' + (cfg.studySources || []).map(function (x) { return '<option' + (st.src === x ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('') + '</select>' +
+      '<select class="select sm" id="st-author" aria-label="작성자"><option value="">작성자 전체</option>' + Object.keys(authors).map(function (a) { return '<option value="' + esc(a) + '"' + (st.author === a ? ' selected' : '') + '>' + esc(nameOf(a)) + '</option>'; }).join('') + '</select>' +
+      '<button class="chip-nav' + (st.photo ? ' on' : '') + '" data-act="st-photo">📷 사진 있는 것만</button>' +
+      '<select class="select sm" id="st-sort" aria-label="정렬">' + [['new', '최근 수정순'], ['old', '오래된순'], ['cmt', '댓글 많은순'], ['title', '제목순']].map(function (o) { return '<option value="' + o[0] + '"' + (st.sort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
+      (filtered ? '<button class="add-link" data-act="st-clear">필터 지우기</button>' : '') +
+      '<span class="st-count">' + list.length + '개</span></div>';
+
+    var body;
+    if (!all.length) {
+      body = '<div class="st-empty"><b>아직 공부 노트가 없어요.</b><span>교수님께 들은 설명, 공부한 내용, 칠판·교과서 사진을 남겨보세요. 사진은 끌어다 놓거나 Ctrl+V로 붙여넣을 수 있어요.</span>' +
+        (canWrite() ? '<button class="btn btn-primary" data-act="study-new" data-board="' + esc(boardId) + '">첫 노트 쓰기</button>' : '') + '</div>';
+    } else if (!list.length) {
+      body = '<div class="st-empty"><b>조건에 맞는 노트가 없어요.</b><span>키워드를 줄이거나 검색어를 바꿔보세요.</span><button class="btn" data-act="st-clear">필터 지우기</button></div>';
+    } else if (st.view === 'board') {
+      var cols = b.sections.concat(list.some(function (e) { return !res.known[e.section]; }) ? [{ id: '__none', name: '분류 없음' }] : []);
+      body = '<div class="kanban">' + cols.map(function (x) {
+        var items = list.filter(function (e) { return x.id === '__none' ? !res.known[e.section] : e.section === x.id; });
+        if (!items.length) return '';
+        return '<div class="kcol" style="--cat:' + catColor(boardId, x.id) + '"><div class="kcol-head"><i class="cat-dot"></i><b>' + esc(x.name) + '</b><span>' + items.length + '</span></div>' +
+          '<div class="kcol-body">' + (items.map(function (e) { return studyCard(e, { terms: res.terms, compact: true }); }).join('') || '<div class="empty-line">비어 있음</div>') + '</div></div>';
+      }).join('') + '</div>';
+    } else if (st.view === 'list') {
+      body = '<div class="slist">' + list.map(function (e) {
+        var sec = b.sections.filter(function (x) { return x.id === e.section; })[0];
+        return '<button class="srow" data-act="study-card" data-id="' + esc(e.id) + '" style="--cat:' + catColor(boardId, e.section) + '">' +
+          '<span class="srow-cat"><i class="cat-dot"></i>' + esc(sec ? sec.name : '분류 없음') + '</span>' +
+          '<span class="srow-main"><b>' + hl(e.title || snippet(e.text).slice(0, 60) || '(제목 없음)', res.terms) + '</b>' +
+          '<span class="srow-tags">' + tagsOf(e).slice(0, 4).map(function (t) { return '#' + esc(t); }).join(' ') + '</span></span>' +
+          '<span class="srow-meta">' + ((e.images || []).length ? '📷' + e.images.length + ' ' : '') + (e.comments ? '💬' + e.comments + ' ' : '') + esc(nameOf(e.authorId)) + ' · ' + shortDate(e.updatedAt) + '</span></button>';
+      }).join('') + '</div>';
+    } else {
+      body = '<div class="gallery">' + list.map(function (e) { return studyCard(e, { terms: res.terms }); }).join('') + '</div>';
+    }
+    return '<div id="study-root" data-board="' + esc(boardId) + '">' + head + tools + cats + kws + filters + body + '</div>';
+  }
+
+  document.addEventListener('input', function (ev) {
+    var t = ev.target;
+    if (t.id === 'st-q') { S.st.q = t.value; clearTimeout(viewStudy._t); viewStudy._t = setTimeout(rerenderKeep, 120); }
+    if (t.closest && t.closest('#cm-form') && t.tagName === 'TEXTAREA') { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 140) + 'px'; }
+  });
+  document.addEventListener('change', function (ev) {
+    var t = ev.target;
+    if (t.id === 'st-src') { S.st.src = t.value; saveSt(); rerenderKeep(); }
+    if (t.id === 'st-author') { S.st.author = t.value; saveSt(); rerenderKeep(); }
+    if (t.id === 'st-sort') { S.st.sort = t.value; saveSt(); rerenderKeep(); }
+    if (t.name === 'imgs' && t.closest('#study-form')) { addStudyFiles(t.files); t.value = ''; }
+  });
+  document.addEventListener('paste', function (ev) {
+    var f = document.getElementById('study-form');
+    var files = Array.prototype.filter.call((ev.clipboardData && ev.clipboardData.files) || [], function (x) { return /^image\//.test(x.type); });
+    if (!files.length) return;
+    if (f) { ev.preventDefault(); return addStudyFiles(files); }
+    var r = parseRoute();
+    if (sheet.hidden && canWrite() && r.name === 'b' && S.idx && S.idx.boards[r.id] && isStudyBoard(S.idx.boards[r.id])) {
+      ev.preventDefault(); openStudyComposer(r.id); addStudyFiles(files);
+    }
+  });
+
+  /* ---------- 공부 노트 작성 ---------- */
+  var CMP = { images: [] };
+  function openStudyComposer(boardId, entry) {
+    var b = S.idx.boards[boardId], cfg = S.data.config;
+    CMP = { images: entry ? (entry.images || []).map(function (im) { return Object.assign({ status: 'done', key: rid('k') }, im); }) : [], board: boardId };
+    var cur = entry ? entry.section : (S.st.cat || (b.sections[0] && b.sections[0].id));
+    var mineTags = entry ? tagsOf(entry) : S.st.tags.slice();
+    var used = {};
+    (S.idx.byTarget['board|' + boardId] || []).forEach(function (e) { tagsOf(e).forEach(function (t) { used[t] = (used[t] || 0) + 1; }); });
+    var tagList = (cfg.studyTags || []).slice();
+    Object.keys(used).sort(function (a, c) { return used[c] - used[a]; }).forEach(function (t) { if (tagList.indexOf(t) < 0) tagList.push(t); });
+    mineTags.forEach(function (t) { if (tagList.indexOf(t) < 0) tagList.push(t); });
+    var src = entry ? entry.source : (cfg.studySources || [])[0];
+    openSheet('<form id="study-form"' + (entry ? ' data-id="' + esc(entry.id) + '"' : '') + ' data-board="' + esc(boardId) + '">' +
+      '<h2 class="sheet-title">' + (entry ? '공부 노트 수정' : '공부 노트 쓰기') + '</h2>' +
+      '<label class="field"><span>제목</span><input class="input" name="title" maxlength="120" value="' + esc(entry ? entry.title : '') + '" placeholder="예: Sufentanil vs fentanyl CSHT" autofocus></label>' +
+      '<label class="field"><span>카테고리</span><select class="select" name="section">' + b.sections.map(function (x) {
+        return '<option value="' + esc(x.id) + '"' + (x.id === cur ? ' selected' : '') + '>' + esc(x.name) + '</option>';
+      }).join('') + '</select></label>' +
+      '<div class="field"><span>출처</span><div class="src-row">' + (cfg.studySources || []).map(function (x) {
+        return '<button type="button" class="kw-btn" data-act="cmp-src" data-v="' + esc(x) + '" aria-pressed="' + (x === src) + '">' + esc(x) + '</button>';
+      }).join('') + '</div></div>' +
+      '<div class="field"><span>키워드 (여러 개 고를 수 있어요)</span><div class="kw-pick" id="kw-pick">' + tagList.map(function (t) {
+        return '<button type="button" class="kw-btn" data-act="cmp-tag" data-v="' + esc(t) + '" aria-pressed="' + (mineTags.indexOf(t) >= 0) + '">#' + esc(t) + '</button>';
+      }).join('') + '</div><input class="input" id="kw-new" placeholder="새 키워드 입력 후 Enter (쉼표로 여러 개)" maxlength="60" style="margin-top:8px"></div>' +
+      '<div class="field"><span>사진</span><label class="dropzone img-drop" data-drop="1"><input type="file" name="imgs" accept="image/*" multiple>' +
+      '<span class="dz-text">사진을 끌어다 놓거나, 눌러서 고르거나, Ctrl+V로 붙여넣기</span></label>' +
+      '<div class="cmp-imgs" id="cmp-imgs"></div>' +
+      '<label class="check" style="margin-top:8px"><input type="checkbox" name="ocr" checked>사진 속 글자를 읽어서 검색되게 하기</label></div>' +
+      '<label class="field"><span>내용</span><textarea class="textarea" name="text" maxlength="5000" placeholder="교수님 설명, 공부한 내용을 정리해 주세요. 사진만 올려도 됩니다.">' + esc(entry ? entry.text : '') + '</textarea>' +
+      '<div class="hint">**굵게** · 줄 앞에 "- " 를 쓰면 목록 · Ctrl/⌘+Enter 저장</div></label>' +
+      (!entry && S.me !== 'anon' ? '<label class="check" style="margin:0 0 14px"><input type="checkbox" name="anon">익명으로 올리기</label>' : '') +
+      '<div class="sheet-actions"><button class="btn" type="button" data-act="close">취소</button><button class="btn btn-primary" type="submit">' + (entry ? '수정 저장' : '올리기') + '</button></div></form>', 'sheet-wide');
+    renderCmpImages();
+    var kn = document.getElementById('kw-new');
+    kn.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' || ev.isComposing) return;
+      ev.preventDefault();
+      addNewTags(kn.value); kn.value = '';
+    });
+  }
+  function addNewTags(v) {
+    var pick = document.getElementById('kw-pick');
+    String(v || '').split(',').map(function (x) { return x.trim().replace(/^#/, ''); }).filter(Boolean).forEach(function (t) {
+      var ex = pick.querySelector('[data-v="' + CSS.escape(t) + '"]');
+      if (ex) { ex.setAttribute('aria-pressed', 'true'); return; }
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'kw-btn'; b.setAttribute('data-act', 'cmp-tag'); b.setAttribute('data-v', t); b.setAttribute('aria-pressed', 'true');
+      b.textContent = '#' + t; pick.appendChild(b);
+    });
+  }
+  function renderCmpImages() {
+    var el = document.getElementById('cmp-imgs');
+    if (!el) return;
+    el.innerHTML = CMP.images.map(function (im, i) {
+      var src = im.preview ? '<img src="' + im.preview + '" alt="">' : imgTag(im.id, 'w300', '');
+      return '<div class="cmp-img ' + (im.status || '') + '">' + src +
+        (im.status === 'up' ? '<span class="cmp-st">올리는 중…</span>' : im.status === 'err' ? '<span class="cmp-st err">실패</span>' : (im.ocr ? '<span class="cmp-st ok" title="' + esc(im.ocr.slice(0, 200)) + '">글자 인식됨</span>' : '')) +
+        (i > 0 ? '<button type="button" class="cmp-x left" data-act="cmp-img-left" data-i="' + i + '" aria-label="앞으로">‹</button>' : '') +
+        '<button type="button" class="cmp-x" data-act="cmp-img-del" data-i="' + i + '" aria-label="빼기">✕</button></div>';
+    }).join('');
+  }
+  function addStudyFiles(files) {
+    var f = document.getElementById('study-form');
+    if (!f) return;
+    var wantOcr = f.querySelector('[name=ocr]').checked;
+    Array.prototype.forEach.call(files, function (file) {
+      if (!/^image\//.test(file.type)) { toast('사진 파일만 올릴 수 있어요. 문서는 각 보드의 인계장 파일에 올려주세요.'); return; }
+      if (CMP.images.length >= 20) { toast('사진은 한 노트에 20장까지예요.'); return; }
+      var item = { key: rid('k'), status: 'up', preview: URL.createObjectURL(file) };
+      CMP.images.push(item);
+      renderCmpImages();
+      prepImage(file).then(function (p) {
+        return api('uploadImage', { image: { data: p.data, mime: p.mime, name: file.name || 'image.jpg', w: p.w, h: p.h, ocr: wantOcr } });
+      }).then(function (j) {
+        Object.assign(item, j.image, { status: 'done' });
+        renderCmpImages();
+      }).catch(function (e) { item.status = 'err'; renderCmpImages(); toast(e.message); });
+    });
+  }
+  // 긴 변 2000px, JPEG로 줄여서 올린다(작은 사진은 그대로).
+  function prepImage(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        var w = img.naturalWidth, h = img.naturalHeight, scale = Math.min(1, 2000 / Math.max(w, h));
+        var keep = scale === 1 && file.size < 1.5 * 1024 * 1024 && /^image\/(jpeg|png|webp|gif)$/.test(file.type);
+        if (keep) {
+          var r = new FileReader();
+          r.onload = function () { resolve({ data: String(r.result).split(',')[1], mime: file.type, w: w, h: h }); };
+          r.onerror = function () { reject(new Error('사진을 읽지 못했어요.')); };
+          r.readAsDataURL(file); return;
+        }
+        var c = document.createElement('canvas');
+        c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+        var ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        resolve({ data: c.toDataURL('image/jpeg', 0.86).split(',')[1], mime: 'image/jpeg', w: c.width, h: c.height });
+      };
+      img.onerror = function () { reject(new Error('이 사진 형식은 열 수 없어요. JPG나 PNG로 올려주세요.')); };
+      img.src = url;
+    });
+  }
+  function submitStudy(f) {
+    if (CMP.images.some(function (i) { return i.status === 'up'; })) return toast('사진을 올리는 중이에요. 잠시 후 다시 눌러주세요.');
+    addNewTags(document.getElementById('kw-new').value);
+    var fd = new FormData(f), id = f.getAttribute('data-id');
+    var tags = Array.prototype.map.call(f.querySelectorAll('#kw-pick [aria-pressed=true]'), function (b) { return b.getAttribute('data-v'); });
+    var srcBtn = f.querySelector('.src-row [aria-pressed=true]');
+    var images = CMP.images.filter(function (i) { return i.status === 'done'; }).map(function (i) { return { id: i.id, w: i.w, h: i.h, ocr: i.ocr || '', cap: i.cap || '' }; });
+    var text = String(fd.get('text') || '').trim(), title = String(fd.get('title') || '').trim();
+    if (!text && !images.length) return toast('내용이나 사진 중 하나는 있어야 해요.');
+    var payload = { title: title, section: fd.get('section'), tags: tags, source: srcBtn ? srcBtn.getAttribute('data-v') : '', text: text, images: images };
+    var btn = f.querySelector('[type=submit]'); btn.disabled = true;
+    var p = id ? api('updateEntry', Object.assign({ id: id }, payload))
+      : api('addEntry', { by: fd.get('anon') ? 'anon' : S.me, entry: Object.assign({ scope: 'board', target: f.getAttribute('data-board') }, payload) });
+    p.then(function (j) {
+      upsertEntry(j.entry); toast(id ? '수정했어요.' : '올렸어요.');
+      openEntry(j.entry.id);
+    }).catch(function (e) { btn.disabled = false; toast(e.message); });
+  }
+
+  /* ---------- 사진 크게 보기 ---------- */
+  var LB = { open: false, id: null, i: 0, el: null };
+  function openLightbox(entryId, i) {
+    LB.id = entryId; LB.i = i; LB.open = true;
+    if (!LB.el) {
+      LB.el = document.createElement('div');
+      LB.el.className = 'lightbox';
+      document.body.appendChild(LB.el);
+      var sx = null;
+      LB.el.addEventListener('touchstart', function (ev) { sx = ev.touches[0].clientX; }, { passive: true });
+      LB.el.addEventListener('touchend', function (ev) {
+        if (sx == null) return;
+        var dx = ev.changedTouches[0].clientX - sx; sx = null;
+        if (Math.abs(dx) > 50) moveLightbox(dx < 0 ? 1 : -1);
+      });
+      LB.el.addEventListener('click', function (ev) { if (ev.target === LB.el || ev.target.classList.contains('lb-stage')) closeLightbox(); });
+    }
+    drawLightbox();
+  }
+  function drawLightbox() {
+    var e = findEntry(LB.id), ims = (e && e.images) || [], im = ims[LB.i];
+    if (!im) return closeLightbox();
+    LB.el.hidden = false;
+    LB.el.innerHTML = '<div class="lb-top"><span>' + (LB.i + 1) + ' / ' + ims.length + '</span>' +
+      (im.ocr ? '<button class="lb-btn" data-act="lb-ocr">글자 보기</button>' : '') +
+      '<a class="lb-btn" href="https://drive.google.com/file/d/' + encodeURIComponent(im.id) + '/view" target="_blank" rel="noopener">원본</a>' +
+      '<button class="lb-btn" data-act="lb-close" aria-label="닫기">✕</button></div>' +
+      '<div class="lb-stage">' + imgTag(im.id, 'w2000', '') + '</div>' +
+      (ims.length > 1 ? '<button class="lb-nav prev" data-act="lb-prev" aria-label="이전">‹</button><button class="lb-nav next" data-act="lb-next" aria-label="다음">›</button>' : '') +
+      (im.ocr ? '<div class="lb-ocr" hidden>' + esc(im.ocr) + '</div>' : '');
+  }
+  function moveLightbox(d) {
+    var e = findEntry(LB.id), n = ((e && e.images) || []).length;
+    if (!n) return;
+    LB.i = (LB.i + d + n) % n; drawLightbox();
+  }
+  function closeLightbox() { LB.open = false; if (LB.el) { LB.el.hidden = true; LB.el.innerHTML = ''; } }
 
   /* ---------- 전체 검색 (Ctrl/⌘+K) ---------- */
   var PALETTE_UI = { open: false, q: '', sel: 0, items: [], el: null };
@@ -1288,13 +1765,14 @@
     if (pages.length) groups.push({ name: '페이지', items: pages.slice(0, 8) });
 
     var entries = S.data.entries.filter(function (e) {
-      return matchAll(e.text + ' ' + (e.tag || '') + ' ' + crumbText(e) + ' ' + nameOf(e.authorId), terms);
+      return matchAll(searchText(e), terms);
     }).sort(function (a, b) {
-      var ta = a.text.toLowerCase().indexOf(terms[0]) >= 0 ? 0 : 1, tb = b.text.toLowerCase().indexOf(terms[0]) >= 0 ? 0 : 1;
+      var ta = ((a.title || '') + a.text).toLowerCase().indexOf(terms[0]) >= 0 ? 0 : 1, tb = ((b.title || '') + b.text).toLowerCase().indexOf(terms[0]) >= 0 ? 0 : 1;
       return ta - tb || (a.updatedAt < b.updatedAt ? 1 : -1);
     });
     if (entries.length) groups.push({ name: '인계 ' + entries.length + '개', items: entries.slice(0, 40).map(function (e) {
-      return { kind: 'entry', icon: '', color: colorOf(e.authorId), title: crumbText(e), html: hl(around(e.text, terms), terms), sub: nameOf(e.authorId) + ' · ' + ago(e.updatedAt),
+      var src = e.text && matchAll(e.text, terms) ? e.text : (e.ocr && matchAll(e.ocr, terms) ? '📷 ' + e.ocr : (e.text || e.tags || ''));
+      return { kind: 'entry', icon: '', color: colorOf(e.authorId), title: crumbText(e), html: hl(around(src, terms), terms), sub: nameOf(e.authorId) + ' · ' + ago(e.updatedAt),
         run: function () { S.focusEntry = e.id; var h = crumbHref(e); if (location.hash === h) render(); else location.hash = h; } };
     }) });
 

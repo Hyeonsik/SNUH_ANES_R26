@@ -22,10 +22,13 @@ var INITIAL_PASSWORDS = {
 var INITIAL_MEMBERS = [];
 
 // 배포된 서버 코드가 어떤 버전인지 확인용. 코드를 바꿀 때마다 올린다.
-var BACKEND_VERSION = '2026-11-16.3';
+var BACKEND_VERSION = '2026-11-18.1';
 
 var ENTRY_COLS = ['id', 'scope', 'target', 'section', 'tag', 'text', 'authorId',
-  'createdAt', 'updatedAt', 'updatedBy', 'confirmedAt', 'confirmedBy', 'deleted'];
+  'createdAt', 'updatedAt', 'updatedBy', 'confirmedAt', 'confirmedBy', 'deleted',
+  'title', 'tags', 'source', 'images', 'ocr', 'ownerKey'];
+var COMMENT_COLS = ['id', 'entryId', 'text', 'authorId', 'createdAt', 'deleted', 'ownerKey'];
+var MAX_IMAGE = 8 * 1024 * 1024;
 var PROF_COLS = ['id', 'name', 'boards', 'memo', 'order', 'deleted'];
 var HIST_COLS = ['ts', 'entryId', 'action', 'by', 'before', 'after'];
 var DOC_COLS = ['id', 'board', 'slot', 'title', 'kind', 'fileId', 'url', 'name', 'mime', 'size', 'note', 'by', 'at', 'deleted'];
@@ -66,12 +69,16 @@ function doPost(e) {
 function route_(req, role) {
   switch (req.action) {
     case 'login': return {};
-    case 'getAll': return getAll_();
+    case 'getAll': return getAll_(req);
     case 'addEntry': need_(role, 'member'); return locked_(function () { return addEntry_(req); });
-    case 'updateEntry': need_(role, 'member'); return locked_(function () { return updateEntry_(req); });
-    case 'deleteEntry': need_(role, 'member'); return locked_(function () { return deleteEntry_(req); });
-    case 'confirmEntry': need_(role, 'member'); return locked_(function () { return confirmEntry_(req); });
+    case 'updateEntry': need_(role, 'member'); return locked_(function () { return updateEntry_(req, role); });
+    case 'deleteEntry': need_(role, 'member'); return locked_(function () { return deleteEntry_(req, role); });
     case 'history': return history_(req);
+    case 'comments': return comments_(req);
+    case 'addComment': need_(role, 'member'); return locked_(function () { return addComment_(req, role); });
+    case 'deleteComment': need_(role, 'member'); return locked_(function () { return deleteComment_(req, role); });
+    case 'uploadImage': need_(role, 'member'); return uploadImage_(req);
+    case 'imageData': return imageData_(req);
     case 'saveConfig': need_(role, 'admin'); return locked_(function () { return saveConfig_(req); });
     case 'saveProfessor': need_(role, 'admin'); return locked_(function () { return saveProfessor_(req); });
     case 'deleteProfessor': need_(role, 'admin'); return locked_(function () { return deleteProfessor_(req); });
@@ -86,10 +93,15 @@ function route_(req, role) {
 
 /* ---------- 조회 ---------- */
 
-function getAll_() {
+function getAll_(req) {
+  var key = ownerKey_(req.ck);
+  var counts = {};
+  readRows_(sheet_('comments', COMMENT_COLS), COMMENT_COLS).forEach(function (c) {
+    if (!truthy_(c.deleted)) counts[c.entryId] = (counts[c.entryId] || 0) + 1;
+  });
   var entries = readRows_(sheet_('entries', ENTRY_COLS), ENTRY_COLS)
     .filter(function (r) { return !truthy_(r.deleted); })
-    .map(function (r) { delete r.deleted; return r; });
+    .map(function (r) { return entryOut_(r, key, counts); });
   var profs = readRows_(sheet_('professors', PROF_COLS), PROF_COLS)
     .filter(function (r) { return !truthy_(r.deleted); })
     .map(profOut_);
@@ -97,6 +109,28 @@ function getAll_() {
     .filter(function (r) { return !truthy_(r.deleted); })
     .map(function (r) { delete r.deleted; delete r.fileId; return r; });
   return { config: readConfig_(), profs: profs, entries: entries, docs: docs, serverTime: now_() };
+}
+
+function entryOut_(r, key, counts) {
+  var o = {};
+  for (var k in r) o[k] = r[k];
+  o.mine = !!(key && o.ownerKey && o.ownerKey === key);
+  delete o.ownerKey; delete o.deleted;
+  try { o.images = o.images ? JSON.parse(o.images) : []; } catch (e) { o.images = []; }
+  o.comments = counts ? (counts[o.id] || 0) : 0;
+  return o;
+}
+
+/** 수정·삭제 권한: 관리자, 같은 기기에서 쓴 사람, 또는 같은 이름(익명 제외)으로 고른 사람 */
+function canModify_(row, req, role) {
+  if (role === 'admin') return true;
+  var key = ownerKey_(req.ck);
+  if (key && row.ownerKey && row.ownerKey === key) return true;
+  return !!(row.authorId && row.authorId !== 'anon' && row.authorId === String(req.by || ''));
+}
+
+function ownerKey_(ck) {
+  return ck ? hash_('owner|' + String(ck)).slice(0, 24) : '';
 }
 
 function history_(req) {
@@ -111,44 +145,50 @@ function addEntry_(req) {
   var e = req.entry || {};
   var cfg = readConfig_();
   validateTarget_(cfg, e.scope, e.target);
-  var text = cleanText_(e.text);
+  var images = cleanImages_(e.images);
+  var text = cleanText_(e.text, images.length);
   var t = now_();
   var row = {
-    id: Utilities.getUuid().replace(/-/g, '').slice(0, 12),
+    id: newId_(),
     scope: e.scope, target: String(e.target),
     section: String(e.section || ''), tag: cleanTag_(e.tag), text: text,
     authorId: String(req.by || ''), createdAt: t, updatedAt: t, updatedBy: String(req.by || ''),
-    confirmedAt: t, confirmedBy: String(req.by || ''), deleted: ''
+    confirmedAt: t, confirmedBy: String(req.by || ''), deleted: '',
+    title: cleanTitle_(e.title), tags: cleanTags_(e.tags), source: String(e.source || '').slice(0, 40),
+    images: JSON.stringify(images), ocr: ocrOf_(images), ownerKey: ownerKey_(req.ck)
   };
   appendRow_(sheet_('entries', ENTRY_COLS), ENTRY_COLS, row);
   log_(row.id, 'add', req.by, '', text);
-  delete row.deleted;
-  return { entry: row };
+  return { entry: entryOut_(row, row.ownerKey, null) };
 }
 
-function updateEntry_(req) {
+function updateEntry_(req, role) {
   var sh = sheet_('entries', ENTRY_COLS);
   var found = findRow_(sh, ENTRY_COLS, req.id);
-  if (!found || truthy_(found.obj.deleted)) throw new Error('이미 삭제되었거나 없는 인계입니다.');
-  var before = found.obj.text;
+  if (!found || truthy_(found.obj.deleted)) throw new Error('이미 삭제되었거나 없는 글입니다.');
   var o = found.obj;
-  if (req.text !== undefined) o.text = cleanText_(req.text);
+  if (!canModify_(o, req, role)) throw new Error('쓴 사람만 수정할 수 있습니다.');
+  var before = o.text;
+  var images = req.images !== undefined ? cleanImages_(req.images) : parseImages_(o.images);
+  if (req.text !== undefined) o.text = cleanText_(req.text, images.length);
   if (req.section !== undefined) o.section = String(req.section || '');
   if (req.tag !== undefined) o.tag = cleanTag_(req.tag);
+  if (req.title !== undefined) o.title = cleanTitle_(req.title);
+  if (req.tags !== undefined) o.tags = cleanTags_(req.tags);
+  if (req.source !== undefined) o.source = String(req.source || '').slice(0, 40);
+  if (req.images !== undefined) { o.images = JSON.stringify(images); o.ocr = ocrOf_(images); }
   o.updatedAt = now_();
   o.updatedBy = String(req.by || '');
-  o.confirmedAt = o.updatedAt;
-  o.confirmedBy = o.updatedBy;
   writeRow_(sh, ENTRY_COLS, found.rowIndex, o);
   log_(o.id, 'edit', req.by, before, o.text);
-  delete o.deleted;
-  return { entry: o };
+  return { entry: entryOut_(o, ownerKey_(req.ck), countComments_(o.id)) };
 }
 
-function deleteEntry_(req) {
+function deleteEntry_(req, role) {
   var sh = sheet_('entries', ENTRY_COLS);
   var found = findRow_(sh, ENTRY_COLS, req.id);
-  if (!found) throw new Error('없는 인계입니다.');
+  if (!found) throw new Error('없는 글입니다.');
+  if (!canModify_(found.obj, req, role)) throw new Error('쓴 사람만 삭제할 수 있습니다.');
   found.obj.deleted = 'TRUE';
   found.obj.updatedAt = now_();
   found.obj.updatedBy = String(req.by || '');
@@ -157,16 +197,113 @@ function deleteEntry_(req) {
   return { id: req.id };
 }
 
-function confirmEntry_(req) {
-  var sh = sheet_('entries', ENTRY_COLS);
-  var found = findRow_(sh, ENTRY_COLS, req.id);
-  if (!found || truthy_(found.obj.deleted)) throw new Error('없는 인계입니다.');
-  found.obj.confirmedAt = now_();
-  found.obj.confirmedBy = String(req.by || '');
-  writeRow_(sh, ENTRY_COLS, found.rowIndex, found.obj);
-  log_(found.obj.id, 'confirm', req.by, '', '');
-  delete found.obj.deleted;
-  return { entry: found.obj };
+/* ---------- 댓글 ---------- */
+
+function comments_(req) {
+  var key = ownerKey_(req.ck);
+  var list = readRows_(sheet_('comments', COMMENT_COLS), COMMENT_COLS)
+    .filter(function (c) { return c.entryId === req.id && !truthy_(c.deleted); })
+    .map(function (c) {
+      var mine = !!(key && c.ownerKey === key);
+      return { id: c.id, entryId: c.entryId, text: c.text, authorId: c.authorId, createdAt: c.createdAt, mine: mine };
+    });
+  return { comments: list };
+}
+
+function addComment_(req, role) {
+  var found = findRow_(sheet_('entries', ENTRY_COLS), ENTRY_COLS, req.id);
+  if (!found || truthy_(found.obj.deleted)) throw new Error('없는 글입니다.');
+  var text = String(req.text || '').replace(/\r\n/g, '\n').trim();
+  if (!text) throw new Error('댓글을 입력하세요.');
+  if (text.length > 2000) throw new Error('댓글은 2000자 이하로 써주세요.');
+  var row = { id: newId_(), entryId: req.id, text: text, authorId: String(req.by || ''), createdAt: now_(), deleted: '', ownerKey: ownerKey_(req.ck) };
+  appendRow_(sheet_('comments', COMMENT_COLS), COMMENT_COLS, row);
+  return { comment: { id: row.id, entryId: row.entryId, text: row.text, authorId: row.authorId, createdAt: row.createdAt, mine: true } };
+}
+
+function deleteComment_(req, role) {
+  var sh = sheet_('comments', COMMENT_COLS);
+  var found = findRow_(sh, COMMENT_COLS, req.id);
+  if (!found || truthy_(found.obj.deleted)) throw new Error('없는 댓글입니다.');
+  if (!canModify_(found.obj, req, role)) throw new Error('쓴 사람만 삭제할 수 있습니다.');
+  found.obj.deleted = 'TRUE';
+  writeRow_(sh, COMMENT_COLS, found.rowIndex, found.obj);
+  return { id: req.id };
+}
+
+function countComments_(entryId) {
+  var n = 0;
+  readRows_(sheet_('comments', COMMENT_COLS), COMMENT_COLS).forEach(function (c) {
+    if (c.entryId === entryId && !truthy_(c.deleted)) n++;
+  });
+  var o = {}; o[entryId] = n;
+  return o;
+}
+
+/* ---------- 사진 ---------- */
+
+function uploadImage_(req) {
+  var d = req.image || {};
+  if (!d.data) throw new Error('사진이 비어 있습니다.');
+  var bytes = Utilities.base64Decode(String(d.data));
+  if (bytes.length > MAX_IMAGE) throw new Error('사진은 8MB 이하만 올릴 수 있습니다.');
+  var mime = /^image\//.test(String(d.mime)) ? String(d.mime) : 'image/jpeg';
+  var name = String(d.name || 'image.jpg').slice(0, 120);
+  var blob = Utilities.newBlob(bytes, mime, name);
+  var file = Drive.Files.create({ name: name, parents: [folder_()], mimeType: mime }, blob, { fields: 'id' });
+  try { Drive.Permissions.create({ type: 'anyone', role: 'reader' }, file.id); } catch (e) { /* 공유 제한 시 서버 경유로 보여줌 */ }
+  var ocr = '';
+  if (d.ocr) ocr = ocrImage_(blob, name);
+  return { image: { id: file.id, w: +d.w || 0, h: +d.h || 0, ocr: ocr } };
+}
+
+/** 구글 드라이브의 문서 변환 OCR. 실패하면 빈 문자열(업로드는 그대로 진행). */
+function ocrImage_(blob, name) {
+  var docId = null;
+  try {
+    var doc = Drive.Files.create({ name: 'ocr-' + name, mimeType: 'application/vnd.google-apps.document', parents: [folder_()] },
+      blob, { ocrLanguage: 'ko', fields: 'id' });
+    docId = doc.id;
+    var text = '';
+    try {
+      var r = Drive.Files.export(docId, 'text/plain');
+      text = typeof r === 'string' ? r : (r && r.getDataAsString ? r.getDataAsString('UTF-8') : '');
+    } catch (e1) {
+      var res = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + docId + '/export?mimeType=text/plain',
+        { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) text = res.getContentText('UTF-8');
+    }
+    return String(text || '').replace(/^\uFEFF/, '').replace(/\s+\n/g, '\n').trim().slice(0, 6000);
+  } catch (e) {
+    return '';
+  } finally {
+    if (docId) { try { Drive.Files.remove(docId); } catch (e2) { try { Drive.Files.update({ trashed: true }, docId); } catch (e3) { /* 무시 */ } } }
+  }
+}
+
+function imageData_(req) {
+  if (!/^[A-Za-z0-9_-]{10,}$/.test(String(req.id || ''))) throw new Error('잘못된 사진입니다.');
+  var b = Drive.Files.get(req.id, { alt: 'media' });
+  if (b && b.getBytes) b = b.getBytes();
+  return { data: Utilities.base64Encode(b) };
+}
+
+function cleanImages_(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 20).filter(function (i) { return i && /^[A-Za-z0-9_-]{10,}$/.test(String(i.id || '')); }).map(function (i) {
+    return { id: String(i.id), w: +i.w || 0, h: +i.h || 0, ocr: String(i.ocr || '').slice(0, 6000), cap: String(i.cap || '').slice(0, 120) };
+  });
+}
+function parseImages_(s) { try { return s ? JSON.parse(s) : []; } catch (e) { return []; } }
+function ocrOf_(images) {
+  return images.map(function (i) { return i.ocr; }).filter(String).join('\n').slice(0, 20000);
+}
+function cleanTitle_(t) { return String(t || '').trim().slice(0, 120); }
+function cleanTags_(t) {
+  var arr = Array.isArray(t) ? t : String(t || '').split(',');
+  var seen = {};
+  return arr.map(function (x) { return String(x).trim().replace(/^#/, '').slice(0, 30); })
+    .filter(function (x) { if (!x || seen[x]) return false; seen[x] = 1; return true; }).slice(0, 15).join(',');
 }
 
 /* ---------- 인계장 파일 ---------- */
@@ -266,6 +403,8 @@ function saveConfig_(req) {
   c.boards.forEach(function (b) {
     if (!b.id || !b.name || !Array.isArray(b.sections)) throw new Error('보드 형식이 올바르지 않습니다.');
   });
+  c.studyTags = cleanTags_(c.studyTags || []).split(',').filter(String);
+  c.studySources = (Array.isArray(c.studySources) ? c.studySources : STUDY_SOURCES).map(String).filter(String).slice(0, 12);
   c.links = (Array.isArray(c.links) ? c.links : []).filter(function (l) {
     return l && l.title && /^https?:\/\//.test(String(l.url || ''));
   });
@@ -325,7 +464,11 @@ function setup() {
   sheet_('professors', PROF_COLS);
   sheet_('history', HIST_COLS);
   sheet_('docs', DOC_COLS);
+  sheet_('comments', COMMENT_COLS);
+  var es = sheet_('entries', ENTRY_COLS);
+  es.getRange(1, 1, 1, ENTRY_COLS.length).setValues([ENTRY_COLS]);
   folder_();
+  migrateStudy_();
   var cs = sheet_('config', ['config']);
   if (!cs.getRange(2, 1).getValue()) cs.getRange(2, 1).setValue(JSON.stringify(defaultConfig_()));
   var props = PropertiesService.getScriptProperties();
@@ -349,6 +492,33 @@ function resetPasswords() {
   return setup();
 }
 
+/** 공부 보드: 카테고리(섹션)와 키워드 기본값. 이미 바꿔 쓴 경우에는 건드리지 않는다. */
+function migrateStudy_() {
+  var cs = sheet_('config', ['config']);
+  var v = cs.getRange(2, 1).getValue();
+  if (!v) return;
+  var c = JSON.parse(v), changed = false;
+  var b = c.boards.filter(function (x) { return x.id === 'study'; })[0];
+  if (b) {
+    if (b.type !== 'study') { b.type = 'study'; changed = true; }
+    var old = ['기도', '약리', '생리·모니터링', '소아', '부위마취', '기타'];
+    var names = b.sections.map(function (x) { return x.name; });
+    if (names.join('|') === old.join('|')) {
+      var keep = {};
+      b.sections.forEach(function (x) { keep[x.name] = x.id; });
+      b.sections = STUDY_CATEGORIES.map(function (n) { return keep[n] ? { id: keep[n], name: n } : sec_(n); });
+      changed = true;
+    }
+  }
+  if (!Array.isArray(c.studyTags) || !c.studyTags.length) { c.studyTags = STUDY_TAGS.slice(); changed = true; }
+  if (!Array.isArray(c.studySources) || !c.studySources.length) { c.studySources = STUDY_SOURCES.slice(); changed = true; }
+  if (changed) cs.getRange(2, 1).setValue(JSON.stringify(c));
+}
+
+var STUDY_CATEGORIES = ['마취 전 평가', '기도', '약리', '모니터링·술기', '수액·수혈·전해질', '호흡·환기', '심혈관', '부위마취·통증', '소아·산과', '분야별 마취', '합병증·응급', '장비·세팅', '기타'];
+var STUDY_TAGS = ['propofol', 'remifentanil', 'rocuronium', 'sugammadex', 'sevoflurane', 'TIVA', 'vasopressor', 'LMA', 'intubation', 'C-line', 'A-line', 'PONV', 'TCI', 'ECG', 'PFT', 'steroid', 'albumin', '수혈', '소아', '산과'];
+var STUDY_SOURCES = ['교수님 설명', '내 공부', '교과서', '강의·학회', '논문'];
+
 function defaultConfig_() {
   var turn = function () {
     return [sec_('턴 개요'), sec_('세팅·준비'), sec_('수술별'), sec_('주의할 점')];
@@ -367,10 +537,12 @@ function defaultConfig_() {
       { id: 'peds', name: '소아', group: '소아 턴', sections: turn() },
       { id: 'brm', name: '보라매', group: '파견 턴', sections: turn() },
       { id: 'tips', name: '꿀팁', group: '공통', sections: [sec_('당직·생활'), sec_('EMR·전산'), sec_('장비·약품'), sec_('기타')] },
-      { id: 'study', name: '공부', group: '공통', sections: [sec_('기도'), sec_('약리'), sec_('생리·모니터링'), sec_('소아'), sec_('부위마취'), sec_('기타')] }
+      { id: 'study', name: '공부', group: '공통', type: 'study', sections: STUDY_CATEGORIES.map(sec_) }
     ],
     profSections: [sec_('스타일'), sec_('세팅·준비'), sec_('선호 약물'), sec_('라인·모니터링'), sec_('유도·유지'), sec_('싫어하시는 것'), sec_('기타')],
-    links: []
+    links: [],
+    studyTags: STUDY_TAGS.slice(),
+    studySources: STUDY_SOURCES.slice()
   };
 }
 
@@ -411,6 +583,8 @@ function readConfig_() {
   var v = sheet_('config', ['config']).getRange(2, 1).getValue();
   var c = v ? JSON.parse(v) : defaultConfig_();
   if (!Array.isArray(c.links)) c.links = [];
+  if (!Array.isArray(c.studyTags)) c.studyTags = STUDY_TAGS.slice();
+  if (!Array.isArray(c.studySources)) c.studySources = STUDY_SOURCES.slice();
   return c;
 }
 
@@ -426,9 +600,9 @@ function validateTarget_(cfg, scope, target) {
   }
 }
 
-function cleanText_(t) {
+function cleanText_(t, allowEmpty) {
   var s = String(t || '').replace(/\r\n/g, '\n').trim();
-  if (!s) throw new Error('내용을 입력하세요.');
+  if (!s && !allowEmpty) throw new Error('내용을 입력하세요.');
   if (s.length > MAX_TEXT) throw new Error('내용이 너무 깁니다(' + MAX_TEXT + '자 이하).');
   return s;
 }
